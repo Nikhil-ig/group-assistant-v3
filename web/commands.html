@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Moderation Commands - Admin Panel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .header h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .commands-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .command-card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .command-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .command-card h2 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 20px;
+        }
+
+        .command-card .description {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+
+        .command-card .permission {
+            display: inline-block;
+            background: #f0f0f0;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 15px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+            font-size: 13px;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 13px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .btn-execute {
+            background: #667eea;
+            color: white;
+            grid-column: 1 / -1;
+        }
+
+        .btn-execute:hover {
+            background: #5568d3;
+        }
+
+        .btn-execute:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-clear {
+            background: #f5f5f5;
+            color: #666;
+        }
+
+        .btn-clear:hover {
+            background: #e0e0e0;
+        }
+
+        .response-area {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #667eea;
+            margin-top: 15px;
+            font-size: 12px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            max-height: 250px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .response-area.show {
+            display: block;
+        }
+
+        .response-area.success {
+            border-left-color: #4caf50;
+            background: #f1f8f4;
+        }
+
+        .response-area.error {
+            border-left-color: #f44336;
+            background: #fdf4f4;
+        }
+
+        .response-area code {
+            color: #333;
+            line-height: 1.6;
+            word-break: break-all;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+        }
+
+        .loading.show {
+            display: block;
+            margin-bottom: 15px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .stats-section {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            margin-bottom: 30px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .optional {
+            font-size: 12px;
+            color: #999;
+            font-weight: normal;
+        }
+
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            color: #1976d2;
+        }
+
+        .info-box strong {
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        @media (max-width: 768px) {
+            .commands-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .command-card {
+                padding: 20px;
+            }
+
+            .header {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🎛️ Moderation Commands - Admin Panel</h1>
+            <p>Execute moderation commands via REST API</p>
+        </div>
+
+        <!-- Info -->
+        <div class="info-box">
+            <strong>ℹ️ API Status:</strong>
+            API Base URL: <code>http://localhost:8000/api/v1/commands</code>
+            <br>
+            Make sure you're logged in with an admin/owner account
+        </div>
+
+        <!-- Commands Grid -->
+        <div class="commands-grid">
+            <!-- 1. Free User Command -->
+            <div class="command-card">
+                <h2>🆓 Free User</h2>
+                <p class="description">Remove all restrictions from a user</p>
+                <span class="permission">⛔ Admin Only</span>
+
+                <form class="command-form" data-command="free">
+                    <div class="form-group">
+                        <label>Group ID *</label>
+                        <input type="text" class="group-id" placeholder="-1001234567890" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target User ID *</label>
+                        <input type="number" class="target-user-id" placeholder="123456789" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target Username <span class="optional">(optional)</span></label>
+                        <input type="text" class="target-username" placeholder="username">
+                    </div>
+
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Processing...</span>
+                    </div>
+
+                    <div class="button-group">
+                        <button type="submit" class="btn-execute">Execute</button>
+                        <button type="reset" class="btn-clear">Clear</button>
+                    </div>
+
+                    <div class="response-area"></div>
+                </form>
+            </div>
+
+            <!-- 2. Get User ID Command -->
+            <div class="command-card">
+                <h2>🆔 Get User ID</h2>
+                <p class="description">Get user ID and detailed user information</p>
+                <span class="permission">✅ Everyone</span>
+
+                <form class="command-form" data-command="id">
+                    <div class="form-group">
+                        <label>Group ID *</label>
+                        <input type="text" class="group-id" placeholder="-1001234567890" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target User ID <span class="optional">(optional)</span></label>
+                        <input type="number" class="target-user-id" placeholder="123456789">
+                    </div>
+
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Processing...</span>
+                    </div>
+
+                    <div class="button-group">
+                        <button type="submit" class="btn-execute">Execute</button>
+                        <button type="reset" class="btn-clear">Clear</button>
+                    </div>
+
+                    <div class="response-area"></div>
+                </form>
+            </div>
+
+            <!-- 3. Get Settings Command -->
+            <div class="command-card">
+                <h2>⚙️ Group Settings</h2>
+                <p class="description">Get group settings and admin list</p>
+                <span class="permission">⛔ Admin Only</span>
+
+                <form class="command-form" data-command="settings">
+                    <div class="form-group">
+                        <label>Group ID *</label>
+                        <input type="text" class="group-id" placeholder="-1001234567890" required>
+                    </div>
+
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Processing...</span>
+                    </div>
+
+                    <div class="button-group">
+                        <button type="submit" class="btn-execute">Execute</button>
+                        <button type="reset" class="btn-clear">Clear</button>
+                    </div>
+
+                    <div class="response-area"></div>
+                </form>
+            </div>
+
+            <!-- 4. Promote User Command -->
+            <div class="command-card">
+                <h2>👑 Promote User</h2>
+                <p class="description">Make user an admin with optional title</p>
+                <span class="permission">🔐 Owner Only</span>
+
+                <form class="command-form" data-command="promote">
+                    <div class="form-group">
+                        <label>Group ID *</label>
+                        <input type="text" class="group-id" placeholder="-1001234567890" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target User ID *</label>
+                        <input type="number" class="target-user-id" placeholder="123456789" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target Username <span class="optional">(optional)</span></label>
+                        <input type="text" class="target-username" placeholder="username">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Custom Title <span class="optional">(optional, max 16 chars)</span></label>
+                        <input type="text" class="custom-title" placeholder="Moderator" maxlength="16">
+                    </div>
+
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Processing...</span>
+                    </div>
+
+                    <div class="button-group">
+                        <button type="submit" class="btn-execute">Execute</button>
+                        <button type="reset" class="btn-clear">Clear</button>
+                    </div>
+
+                    <div class="response-area"></div>
+                </form>
+            </div>
+
+            <!-- 5. Demote User Command -->
+            <div class="command-card">
+                <h2>👤 Demote User</h2>
+                <p class="description">Remove admin privileges from user</p>
+                <span class="permission">🔐 Owner Only</span>
+
+                <form class="command-form" data-command="demote">
+                    <div class="form-group">
+                        <label>Group ID *</label>
+                        <input type="text" class="group-id" placeholder="-1001234567890" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target User ID *</label>
+                        <input type="number" class="target-user-id" placeholder="123456789" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Target Username <span class="optional">(optional)</span></label>
+                        <input type="text" class="target-username" placeholder="username">
+                    </div>
+
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Processing...</span>
+                    </div>
+
+                    <div class="button-group">
+                        <button type="submit" class="btn-execute">Execute</button>
+                        <button type="reset" class="btn-clear">Clear</button>
+                    </div>
+
+                    <div class="response-area"></div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="stats-section">
+            <h3 style="margin-bottom: 20px; color: #333;">📊 Command Summary</h3>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">Commands Available</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">✅</div>
+                    <div class="stat-label">All Integrated with API</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">🔐</div>
+                    <div class="stat-label">RBAC Protected</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">📝</div>
+                    <div class="stat-label">Database Logged</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // API service class
+        class ModerationAPI {
+            constructor(baseUrl = 'http://localhost:8000/api/v1') {
+                this.baseUrl = baseUrl;
+                this.token = localStorage.getItem('jwt_token');
+            }
+
+            async request(method, endpoint, data = null) {
+                const url = `${this.baseUrl}${endpoint}`;
+                const options = {
+                    method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.token}`
+                    }
+                };
+
+                if (data) {
+                    options.body = JSON.stringify(data);
+                }
+
+                try {
+                    const response = await fetch(url, options);
+                    const result = await response.json();
+
+                    return {
+                        ok: response.ok,
+                        status: response.status,
+                        data: result
+                    };
+                } catch (error) {
+                    return {
+                        ok: false,
+                        status: 0,
+                        error: error.message
+                    };
+                }
+            }
+
+            async freeUser(groupId, targetUserId, targetUsername) {
+                return this.request('POST', '/commands/free', {
+                    group_id: parseInt(groupId),
+                    target_user_id: parseInt(targetUserId),
+                    target_username: targetUsername
+                });
+            }
+
+            async getUserID(groupId, targetUserId) {
+                return this.request('POST', '/commands/id', {
+                    group_id: parseInt(groupId),
+                    target_user_id: targetUserId ? parseInt(targetUserId) : null
+                });
+            }
+
+            async getGroupSettings(groupId) {
+                return this.request('GET', `/commands/settings/${groupId}`);
+            }
+
+            async promoteUser(groupId, targetUserId, customTitle, targetUsername) {
+                return this.request('POST', '/commands/promote', {
+                    group_id: parseInt(groupId),
+                    target_user_id: parseInt(targetUserId),
+                    custom_title: customTitle,
+                    target_username: targetUsername
+                });
+            }
+
+            async demoteUser(groupId, targetUserId, targetUsername) {
+                return this.request('POST', '/commands/demote', {
+                    group_id: parseInt(groupId),
+                    target_user_id: parseInt(targetUserId),
+                    target_username: targetUsername
+                });
+            }
+        }
+
+        // Initialize API
+        const api = new ModerationAPI();
+
+        // Setup form handlers
+        document.querySelectorAll('.command-form').forEach(form => {
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const command = form.dataset.command;
+                const groupId = form.querySelector('.group-id').value;
+                const loading = form.querySelector('.loading');
+                const response = form.querySelector('.response-area');
+                const submitBtn = form.querySelector('.btn-execute');
+
+                // Show loading
+                loading.classList.add('show');
+                submitBtn.disabled = true;
+
+                try {
+                    let result;
+
+                    switch (command) {
+                        case 'free':
+                            const targetUserId = form.querySelector('.target-user-id').value;
+                            const targetUsername = form.querySelector('.target-username').value;
+                            result = await api.freeUser(groupId, targetUserId, targetUsername);
+                            break;
+
+                        case 'id':
+                            const targetUserId2 = form.querySelector('.target-user-id').value;
+                            result = await api.getUserID(groupId, targetUserId2);
+                            break;
+
+                        case 'settings':
+                            result = await api.getGroupSettings(groupId);
+                            break;
+
+                        case 'promote':
+                            const targetUserId3 = form.querySelector('.target-user-id').value;
+                            const customTitle = form.querySelector('.custom-title').value;
+                            const targetUsername3 = form.querySelector('.target-username').value;
+                            result = await api.promoteUser(groupId, targetUserId3, customTitle, targetUsername3);
+                            break;
+
+                        case 'demote':
+                            const targetUserId4 = form.querySelector('.target-user-id').value;
+                            const targetUsername4 = form.querySelector('.target-username').value;
+                            result = await api.demoteUser(groupId, targetUserId4, targetUsername4);
+                            break;
+                    }
+
+                    // Display response
+                    response.classList.add('show');
+                    response.classList.toggle('success', result.ok);
+                    response.classList.toggle('error', !result.ok);
+                    response.innerHTML = `<code>${JSON.stringify(result.data || result.error, null, 2)}</code>`;
+
+                } catch (error) {
+                    response.classList.add('show', 'error');
+                    response.innerHTML = `<code>Error: ${error.message}</code>`;
+                } finally {
+                    loading.classList.remove('show');
+                    submitBtn.disabled = false;
+                }
+            });
+
+            // Clear response on reset
+            form.addEventListener('reset', () => {
+                form.querySelector('.response-area').classList.remove('show', 'success', 'error');
+                form.querySelector('.loading').classList.remove('show');
+            });
+        });
+
+        // Check for token on page load
+        window.addEventListener('load', () => {
+            if (!api.token) {
+                alert('❌ No JWT token found!\n\nPlease login first to get a token.');
+            }
+        });
+    </script>
+</body>
+
+</html>
