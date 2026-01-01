@@ -172,30 +172,31 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
-            cd ${{ secrets.DEPLOY_PATH }}
+            # Set deployment directory (default if not provided)
+            DEPLOY_PATH="/home/${{ secrets.SERVER_USER }}/telegram-bot"
+            cd "$DEPLOY_PATH"
             
             # Pull latest code
             git fetch origin
             git checkout production
             git pull origin production
             
-            # Load environment variables
-            source ~/.env
-            
             # Pull latest Docker image
             docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             
-            # Stop old container
-            docker stop telegram-bot || true
-            docker rm telegram-bot || true
+            # Stop and remove old container
+            if [ "$(docker ps -a -q -f name=telegram-bot)" ]; then
+              docker stop telegram-bot || true
+              docker rm telegram-bot || true
+            fi
             
-            # Run new container
+            # Run new container with environment from secrets
             docker run -d \
               --name telegram-bot \
               --restart always \
-              -e TELEGRAM_TOKEN=$TELEGRAM_TOKEN \
-              -e MONGODB_URL=$MONGODB_URL \
-              -e JWT_SECRET=$JWT_SECRET \
+              -e TELEGRAM_TOKEN='${{ secrets.TELEGRAM_TOKEN }}' \
+              -e MONGODB_URL='${{ secrets.MONGODB_URL }}' \
+              -e JWT_SECRET='${{ secrets.JWT_SECRET }}' \
               -e ENVIRONMENT=production \
               -e LOG_LEVEL=INFO \
               -p 8000:8000 \
@@ -203,18 +204,27 @@ jobs:
               -v /etc/letsencrypt:/etc/letsencrypt:ro \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             
-            # Run health check
+            # Wait for container startup
             sleep 10
-            curl -f http://localhost:8000/health || exit 1
             
-            # Clean up old images
-            docker image prune -a --force --filter "until=72h"
+            # Health check (retry up to 5 times)
+            for i in {1..5}; do
+              if curl -f http://127.0.0.1:8000/health > /dev/null 2>&1; then
+                echo "✅ Health check passed"
+                exit 0
+              fi
+              echo "Health check attempt $i/5 failed, retrying..."
+              sleep 2
+            done
+            
+            echo "❌ Health check failed after 5 attempts"
+            docker logs telegram-bot
+            exit 1
 
       - name: Notify Slack on deployment
         if: success()
         uses: slackapi/slack-github-action@v1.24.0
         with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
           payload: |
             {
               "text": "✅ Telegram Bot deployed successfully to production",
@@ -228,12 +238,13 @@ jobs:
                 }
               ]
             }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
       - name: Notify Slack on failure
         if: failure()
         uses: slackapi/slack-github-action@v1.24.0
         with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
           payload: |
             {
               "text": "❌ Telegram Bot deployment failed",
@@ -247,3 +258,5 @@ jobs:
                 }
               ]
             }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
