@@ -13207,3 +13207,5 @@ venv/lib/python3.10/site-packages/yarl-1.22.0.dist-info/top_level.txt
 venv/lib/python3.10/site-packages/yarl-1.22.0.dist-info/WHEEL
 venv/lib/python3.10/site-packages/yarl-1.22.0.dist-info/licenses/LICENSE
 venv/lib/python3.10/site-packages/yarl-1.22.0.dist-info/licenses/NOTICE
+logs/api.log
+logs/bot.log
