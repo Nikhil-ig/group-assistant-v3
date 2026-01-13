@@ -6,7 +6,19 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="/Users/apple/.pyenv/versions/3.10.11/bin/python"
+
+# Detect Python - try venv first, then system python3
+if [ -f "$PROJECT_DIR/venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
+elif command -v python3 &> /dev/null; then
+    PYTHON_BIN="python3"
+elif command -v python &> /dev/null; then
+    PYTHON_BIN="python"
+else
+    echo "❌ Python not found! Please install Python 3.10+"
+    exit 1
+fi
+
 TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-8366781443:AAHIXgGD1UXvPWw9EIDBlMk5Ktuhj2qQ8WU}"
 
 echo "╔══════════════════════════════════════════════════════════════╗"
