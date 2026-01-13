@@ -11,7 +11,19 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$PROJECT_DIR/venv/bin/python" ]; then
     PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
 elif command -v python3 &> /dev/null; then
-    PYTHON_BIN="python3"
+    # Create venv if it doesn't exist
+    if [ ! -d "$PROJECT_DIR/venv" ]; then
+        echo "📦 Creating virtual environment..."
+        python3 -m venv "$PROJECT_DIR/venv"
+        echo "📦 Installing dependencies..."
+        "$PROJECT_DIR/venv/bin/pip" install --upgrade pip
+        "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/requirements.txt"
+        "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/bot/requirements.txt"
+        "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/centralized_api/requirements.txt"
+        "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/web/requirements.txt"
+        echo "✅ Virtual environment ready!"
+    fi
+    PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
 elif command -v python &> /dev/null; then
     PYTHON_BIN="python"
 else
