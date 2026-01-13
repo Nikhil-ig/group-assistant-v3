@@ -251,3 +251,4 @@ docker-compose.override.yml
 
 # Logs directory
 logs/
+.env
