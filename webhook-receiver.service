@@ -1,0 +1,17 @@
+[Unit]
+Description=GitHub Webhook Receiver for Group Assistant V3
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/group-assistant-v3
+ExecStart=/bin/bash /opt/group-assistant-v3/webhook-receiver.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
