@@ -199,8 +199,8 @@ case $deployment_choice in
             }
         fi
         
-        sudo mkdir -p /etc/webhook
-        sudo cat > /etc/webhook/hooks.json <<'WEBHOOK_EOF'
+        mkdir -p /etc/webhook
+        cat > /etc/webhook/hooks.json <<'WEBHOOK_EOF'
 [
   {
     "id": "group-assistant-deploy",
@@ -216,10 +216,9 @@ case $deployment_choice in
 ]
 WEBHOOK_EOF
         
-        sudo chown webhook:webhook /etc/webhook/hooks.json
-        sudo chmod 600 /etc/webhook/hooks.json
+        chmod 600 /etc/webhook/hooks.json
         
-        sudo cat > /etc/systemd/system/webhook.service <<'SERVICE_EOF'
+        cat > /etc/systemd/system/webhook.service <<'SERVICE_EOF'
 [Unit]
 Description=GitHub Webhook Service
 After=network.target
@@ -233,9 +232,9 @@ RestartSec=10
 WantedBy=multi-user.target
 SERVICE_EOF
         
-        sudo systemctl daemon-reload
-        sudo systemctl enable webhook
-        sudo systemctl start webhook
+        systemctl daemon-reload
+        systemctl enable webhook
+        systemctl start webhook
         
         echo -e "${GREEN}✅ Webhook service started${NC}"
         echo ""
@@ -248,8 +247,9 @@ SERVICE_EOF
     2)
         echo -e "${BLUE}Setting up cron job...${NC}"
         
-        # Add cron job
-        (crontab -l 2>/dev/null || true; echo "*/5 * * * * /opt/group-assistant-v3/deploy-vps.sh >> /var/log/group-assistant-deploy.log 2>&1") | crontab -
+        # Add cron job (for root since we're running as sudo)
+        # Add to root's crontab
+        (sudo crontab -l 2>/dev/null || true; echo "*/5 * * * * /opt/group-assistant-v3/deploy-vps.sh >> /var/log/group-assistant-deploy.log 2>&1") | sudo crontab -
         
         echo -e "${GREEN}✅ Cron job added (runs every 5 minutes)${NC}"
         ;;
