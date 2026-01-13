@@ -21,7 +21,7 @@ services:
     image: redis:7.2
     container_name: v3-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: redis-cli ping
       interval: 10s
