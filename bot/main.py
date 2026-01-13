@@ -9,6 +9,12 @@ import logging
 import os
 from typing import Optional
 import html
+from pathlib import Path
+
+# Load environment variables from a local .env file (if present).
+# This allows running the bot on a VPS or locally without exporting
+# the TELEGRAM_BOT_TOKEN and other variables into the shell.
+from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
@@ -17,6 +23,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, BotCommand
 import httpx
+
+# Try to load .env placed next to this file (project-level .env)
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(env_path)
 
 # Configure logging
 logging.basicConfig(
