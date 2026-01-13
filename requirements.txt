@@ -2,7 +2,7 @@
 # This file combines dependencies from: bot/, centralized_api/, web/
 # Keep service-specific requirement files for isolated installs if needed.
 
-aiogram==3.0.0
+aiogram>=3.0.0,<4.0.0
 aioredis==2.0.1
 aiohttp~=3.8.5
 fastapi==0.104.1
