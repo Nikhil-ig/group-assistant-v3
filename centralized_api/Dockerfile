@@ -2,7 +2,7 @@
 FROM python:3.10-slim as builder
 
 WORKDIR /build
-COPY requirements.txt .
+COPY centralized_api/requirements.txt .
 
 # Install dependencies to a virtual environment
 RUN python -m venv /opt/venv
@@ -29,8 +29,8 @@ ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Copy application code - copy centralized_api package contents to app directory
-COPY . /app/centralized_api/
+# Copy application code - copy entire centralized_api package
+COPY centralized_api /app/centralized_api
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /opt/venv

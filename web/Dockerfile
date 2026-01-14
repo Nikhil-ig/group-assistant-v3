@@ -2,7 +2,7 @@
 FROM python:3.10-slim as builder
 
 WORKDIR /build
-COPY requirements.txt .
+COPY web/requirements.txt .
 
 # Install dependencies to a virtual environment
 RUN python -m venv /opt/venv
@@ -30,7 +30,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Copy application code
-COPY . .
+COPY web /app/web
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /opt/venv
@@ -44,4 +44,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
 EXPOSE 8002
 
 # Run application with uvicorn directly
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["uvicorn", "web.app:app", "--host", "0.0.0.0", "--port", "8002"]

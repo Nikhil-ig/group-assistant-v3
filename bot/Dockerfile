@@ -2,7 +2,7 @@
 FROM python:3.10-slim as builder
 
 WORKDIR /build
-COPY requirements.txt .
+COPY bot/requirements.txt .
 
 # Install dependencies to a virtual environment
 RUN python -m venv /opt/venv
@@ -29,11 +29,11 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Copy application code
-COPY . .
+COPY bot /app/bot
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /opt/venv
 USER appuser
 
 # Run application with restart capability
-CMD ["python", "main.py"]
+CMD ["python", "bot/main.py"]
