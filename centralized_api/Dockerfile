@@ -29,8 +29,8 @@ ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Copy application code
-COPY . .
+# Copy application code - copy centralized_api package contents to app directory
+COPY . /app/centralized_api/
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /opt/venv
