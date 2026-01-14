@@ -42,19 +42,21 @@ $DOCKER_CMD volume prune -f 2>/dev/null || true
 echo ""
 echo -e "${BLUE}🔍 Checking for processes on port 8000, 8001, 8002, 8003...${NC}"
 for PORT in 8000 8001 8002 8003; do
-    if netstat -tulpn 2>/dev/null | grep -q ":$PORT "; then
-        echo -e "${YELLOW}⚠️  Port $PORT is still in use${NC}"
-        PID=$(netstat -tulpn 2>/dev/null | grep ":$PORT " | awk '{print $NF}' | cut -d'/' -f1)
-        if [ ! -z "$PID" ] && [ "$PID" != "-" ]; then
-            echo -e "${YELLOW}   Killing process $PID${NC}"
-            kill -9 $PID 2>/dev/null || true
-        fi
+    # Try multiple methods to find and kill processes
+    PID=$(sudo lsof -ti :$PORT 2>/dev/null || true)
+    
+    if [ ! -z "$PID" ]; then
+        echo -e "${YELLOW}⚠️  Port $PORT is in use by PID(s): $PID${NC}"
+        for p in $PID; do
+            echo -e "${YELLOW}   Force killing process $p${NC}"
+            sudo kill -9 $p 2>/dev/null || true
+        done
     else
         echo -e "${GREEN}✅ Port $PORT is free${NC}"
     fi
 done
 
-sleep 2
+sleep 3
 
 echo ""
 echo -e "${GREEN}✅ Cleanup complete!${NC}"
