@@ -54,13 +54,13 @@ echo -e "${GREEN}✅ MongoDB started (PID: $MONGO_PID)${NC}"
 echo ""
 
 # 2. Start Centralized API
-echo -e "${BLUE}2️⃣  Starting Centralized API on port 8000...${NC}"
+echo -e "${BLUE}2️⃣  Starting Centralized API on port 8001...${NC}"
 cd "$PROJECT_DIR"
-# Kill any lingering process on port 8000
-fuser -k 8000/tcp 2>/dev/null || true
+# Kill any lingering process on port 8001
+fuser -k 8001/tcp 2>/dev/null || true
 sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
-$PYTHON_BIN -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8000 > /tmp/api.log 2>&1 &
+$PYTHON_BIN -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8001 > /tmp/api.log 2>&1 &
 API_PID=$!
 sleep 3
 echo -e "${GREEN}✅ Centralized API started (PID: $API_PID)${NC}"
@@ -69,6 +69,7 @@ echo ""
 # 3. Start Web Service
 echo -e "${BLUE}3️⃣  Starting Web Service on port 8003...${NC}"
 cd "$PROJECT_DIR"
+export CENTRALIZED_API_URL="http://localhost:8001"
 $PYTHON_BIN -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
 WEB_PID=$!
 sleep 2
@@ -78,6 +79,7 @@ echo ""
 # 4. Start Telegram Bot
 echo -e "${BLUE}4️⃣  Starting Telegram Bot (polling)...${NC}"
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
+export CENTRALIZED_API_URL="http://localhost:8001"
 cd "$PROJECT_DIR"
 $PYTHON_BIN bot/main.py > /tmp/bot.log 2>&1 &
 BOT_PID=$!
@@ -93,14 +95,14 @@ echo ""
 echo "📊 Service Status:"
 echo ""
 echo -e "  ${GREEN}MongoDB${NC}             PID: $MONGO_PID   (port 27018)"
-echo -e "  ${GREEN}Centralized API${NC}     PID: $API_PID   (port 8000)"
+echo -e "  ${GREEN}Centralized API${NC}     PID: $API_PID   (port 8001)"
 echo -e "  ${GREEN}Web Service${NC}         PID: $WEB_PID   (port 8003)"
 echo -e "  ${GREEN}Telegram Bot${NC}        PID: $BOT_PID   (polling)"
 echo ""
 echo "🔗 Access Points:"
-echo "  • Centralized API: http://localhost:8000"
+echo "  • Centralized API: http://localhost:8001"
 echo "  • Web Service:     http://localhost:8003"
-echo "  • API Docs:        http://localhost:8000/docs"
+echo "  • API Docs:        http://localhost:8001/docs"
 echo "  • Web Docs:        http://localhost:8003/docs"
 echo ""
 echo "📝 Log Files:"

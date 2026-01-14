@@ -42,7 +42,7 @@ services:
       dockerfile: Dockerfile
     container_name: v3-centralized-api
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       MONGODB_URL: mongodb://root:example@mongo:27017
       DATABASE_NAME: bot_rbac
