@@ -33,9 +33,17 @@ fi
 
 TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-8366781443:AAHIXgGD1UXvPWw9EIDBlMk5Ktuhj2qQ8WU}"
 
+
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║     V3 Microservices Startup - Starting All Services        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+
+# Always pull latest code from git before starting services
+echo -e "${BLUE}🔄 Pulling latest code from git...${NC}"
+cd "$PROJECT_DIR"
+git pull origin main
+echo -e "${GREEN}✅ Latest code pulled from git.${NC}"
 echo ""
 
 # Color codes
@@ -44,20 +52,46 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# 1. Start MongoDB
+OS_TYPE="$(uname)"
+# 1. Start MongoDB (cross-platform)
 echo -e "${BLUE}1️⃣  Starting MongoDB on port 27018...${NC}"
 mkdir -p /tmp/mongo_data
-mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
-MONGO_PID=$!
-sleep 2
-echo -e "${GREEN}✅ MongoDB started (PID: $MONGO_PID)${NC}"
+# Check if mongod is already running on port 27018
+if [ "$OS_TYPE" = "Darwin" ]; then
+    # macOS: use lsof
+    if lsof -i :27018 | grep mongod > /dev/null; then
+        echo -e "${YELLOW}⚠️  MongoDB already running on port 27018 (macOS). Skipping start.${NC}"
+        MONGO_PID=$(lsof -ti :27018)
+    else
+        mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
+        MONGO_PID=$!
+        sleep 2
+        echo -e "${GREEN}✅ MongoDB started (PID: $MONGO_PID)${NC}"
+    fi
+else
+    # Linux: try fuser, then start mongod
+    if fuser 27018/tcp > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  MongoDB already running on port 27018 (Linux). Skipping start.${NC}"
+        MONGO_PID=$(fuser 27018/tcp 2>/dev/null)
+    else
+        mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
+        MONGO_PID=$!
+        sleep 2
+        echo -e "${GREEN}✅ MongoDB started (PID: $MONGO_PID)${NC}"
+    fi
+fi
 echo ""
 
 # 2. Start Centralized API
 echo -e "${BLUE}2️⃣  Starting Centralized API on port 8001...${NC}"
 cd "$PROJECT_DIR"
-# Kill any lingering process on port 8001
-fuser -k 8001/tcp 2>/dev/null || true
+if [ "$OS_TYPE" = "Darwin" ]; then
+    # macOS: use lsof to kill process on port 8001
+    lsof -ti :8001 | xargs kill -9 2>/dev/null || true
+else
+    # Linux: use fuser
+    fuser -k 8001/tcp 2>/dev/null || true
+fi
 sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
 $PYTHON_BIN -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8001 > /tmp/api.log 2>&1 &

@@ -136,6 +136,20 @@
     │ /greet                              │
     │ ✅ Bot responds!                    │
     └─────────────────────────────────────┘
+
+---
+
+## ⚠️ Note for Mac Users
+
+If you see services reporting as started but they are not actually running (e.g., stopping script says "not running"), this is usually due to differences in how process management and backgrounding work on macOS vs Linux (VPS). On Mac:
+
+- Make sure you have the correct Python version and all dependencies installed.
+- Check the logs (e.g., `tail -f /tmp/bot.log`) for errors or missing dependencies.
+- If you see errors about missing files or directories, ensure you are running the script from the project root.
+- If you use Homebrew MongoDB, it may already be running on a different port (default 27017). You may need to stop the Homebrew service or change the script port.
+
+This project is designed to work both on your Mac (for local development) and on your VPS (for production). If you encounter issues unique to your Mac, check the logs and environment, and adjust ports or dependencies as needed.
+    └─────────────────────────────────────┘
 ```
 
 ---

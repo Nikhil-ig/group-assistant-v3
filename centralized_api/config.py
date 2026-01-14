@@ -10,7 +10,7 @@ from typing import Optional
 # ============================================================================
 
 MONGODB_HOST = os.getenv("MONGODB_HOST", "localhost")
-MONGODB_PORT = int(os.getenv("MONGODB_PORT", 27018))
+MONGODB_PORT = int(os.getenv("MONGODB_PORT", 27017))
 MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "telegram_bot")
 MONGODB_USERNAME = os.getenv("MONGODB_USERNAME", "")
 MONGODB_PASSWORD = os.getenv("MONGODB_PASSWORD", "")
