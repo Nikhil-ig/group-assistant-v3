@@ -40,7 +40,14 @@ echo -e "${BLUE}🧹 Removing dangling volumes...${NC}"
 $DOCKER_CMD volume prune -f 2>/dev/null || true
 
 echo ""
-echo -e "${BLUE}🔍 Checking for processes on port 8000, 8001, 8002, 8003...${NC}"
+echo -e "${BLUE}�️  Removing all images for this project...${NC}"
+$DOCKER_CMD rmi -f group-assistant-v3-centralized-api 2>/dev/null || true
+$DOCKER_CMD rmi -f group-assistant-v3-web 2>/dev/null || true
+$DOCKER_CMD rmi -f group-assistant-v3-bot 2>/dev/null || true
+
+sleep 2
+
+echo -e "${BLUE}�🔍 Checking for processes on port 8000, 8001, 8002, 8003...${NC}"
 for PORT in 8000 8001 8002 8003; do
     # Try multiple methods to find and kill processes
     PID=$(sudo lsof -ti :$PORT 2>/dev/null || true)
