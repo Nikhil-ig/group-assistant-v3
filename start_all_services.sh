@@ -63,16 +63,16 @@ NC='\033[0m' # No Color
 
 OS_TYPE="$(uname)"
 # 1. Start MongoDB (cross-platform)
-echo -e "${BLUE}1️⃣  Starting MongoDB on port 27018...${NC}"
+echo -e "${BLUE}1️⃣  Starting MongoDB on port 27017...${NC}"
 mkdir -p /tmp/mongo_data
-# Check if mongod is already running on port 27018
+# Check if mongod is already running on port 27017
 if [ "$OS_TYPE" = "Darwin" ]; then
     # macOS: use lsof
-    if lsof -i :27018 | grep mongod > /dev/null; then
-        echo -e "${YELLOW}⚠️  MongoDB already running on port 27018 (macOS). Skipping start.${NC}"
-        MONGO_PID=$(lsof -ti :27018)
+    if lsof -i :27017 | grep mongod > /dev/null; then
+        echo -e "${YELLOW}⚠️  MongoDB already running on port 27017 (macOS). Skipping start.${NC}"
+        MONGO_PID=$(lsof -ti :27017)
     else
-        mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
+        mongod --port 27017 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
         MONGO_PID=$!
         echo $MONGO_PID > /tmp/mongo.pid
         sleep 2
@@ -80,11 +80,11 @@ if [ "$OS_TYPE" = "Darwin" ]; then
     fi
 else
     # Linux: try fuser, then start mongod
-    if fuser 27018/tcp > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  MongoDB already running on port 27018 (Linux). Skipping start.${NC}"
-        MONGO_PID=$(fuser 27018/tcp 2>/dev/null)
+    if fuser 27017/tcp > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  MongoDB already running on port 27017 (Linux). Skipping start.${NC}"
+        MONGO_PID=$(fuser 27017/tcp 2>/dev/null)
     else
-        mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
+        mongod --port 27017 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
         MONGO_PID=$!
         echo $MONGO_PID > /tmp/mongo.pid
         sleep 2
@@ -142,7 +142,7 @@ echo "╚═══════════════════════�
 echo ""
 echo "📊 Service Status:"
 echo ""
-echo -e "  ${GREEN}MongoDB${NC}             PID: $MONGO_PID   (port 27018)"
+echo -e "  ${GREEN}MongoDB${NC}             PID: $MONGO_PID   (port 27017)"
 echo -e "  ${GREEN}Centralized API${NC}     PID: $API_PID   (port 8001)"
 echo -e "  ${GREEN}Web Service${NC}         PID: $WEB_PID   (port 8003)"
 echo -e "  ${GREEN}Telegram Bot${NC}        PID: $BOT_PID   (polling)"
