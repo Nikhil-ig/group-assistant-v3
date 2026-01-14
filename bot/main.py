@@ -21,8 +21,9 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, BotCommand
+from aiogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 import httpx
+import asyncio
 
 # Try to load .env placed next to this file (project-level .env)
 env_path = Path(__file__).resolve().parent / ".env"
@@ -108,6 +109,66 @@ def escape_error_message(error_msg: str) -> str:
     return html.escape(error_msg)
 
 
+async def send_and_delete(message: Message, text: str, delay: int = 5, **kwargs):
+    """Send a message and auto-delete it after delay seconds"""
+    try:
+        sent_msg = await message.answer(text, **kwargs)
+        await asyncio.sleep(delay)
+        await sent_msg.delete()
+    except Exception as e:
+        logger.error(f"Failed to send and delete message: {e}")
+
+
+async def send_action_response(message: Message, action: str, user_id: int, success: bool, error: Optional[str] = None, delay: int = 5):
+    """Send a beautiful formatted action response with auto-delete"""
+    if success:
+        emoji_map = {
+            "ban": "🔨",
+            "unban": "✅",
+            "kick": "👢",
+            "mute": "🔇",
+            "unmute": "🔊",
+            "pin": "📌",
+            "unpin": "📍",
+            "promote": "⬆️",
+            "demote": "⬇️",
+            "warn": "⚠️",
+            "restrict": "🔒",
+            "unrestrict": "🔓",
+            "lockdown": "🔐",
+            "purge": "🗑️",
+            "set_role": "👤",
+            "remove_role": "👤",
+        }
+        emoji = emoji_map.get(action, "✅")
+        
+        action_text = {
+            "ban": "banned",
+            "unban": "unbanned",
+            "kick": "kicked",
+            "mute": "muted",
+            "unmute": "unmuted",
+            "pin": "pinned",
+            "unpin": "unpinned",
+            "promote": "promoted to admin",
+            "demote": "demoted",
+            "warn": "warned",
+            "restrict": "restricted",
+            "unrestrict": "unrestricted",
+            "lockdown": "locked down",
+            "purge": "purged",
+            "set_role": "role set",
+            "remove_role": "role removed",
+        }
+        
+        text = action_text.get(action, action)
+        response = f"{emoji} <b>User {user_id} has been {text}</b>"
+    else:
+        response = f"❌ <b>Error:</b>\n<code>{escape_error_message(error)}</code>"
+    
+    await send_and_delete(message, response, delay=delay, parse_mode=ParseMode.HTML)
+
+
 # Global instances
 bot: Optional[Bot] = None
 dispatcher: Optional[Dispatcher] = None
@@ -160,40 +221,54 @@ async def get_user_id_from_reply(message: Message) -> Optional[int]:
 
 async def cmd_start(message: Message):
     """Handle /start command"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📖 Help", callback_data="help"),
+         InlineKeyboardButton(text="📊 Status", callback_data="status")],
+        [InlineKeyboardButton(text="❓ Commands", callback_data="commands")]
+    ])
+    
     await message.answer(
-        "🤖 Welcome to the Telegram Bot!\n\n"
-        "Available commands:\n"
-        "/help - Show help\n"
-        "/status - Bot status\n"
-        "/ban - Ban user\n"
-        "/kick - Kick user\n"
-        "/mute - Mute user\n"
-        "/unmute - Unmute user\n"
-        "/pin - Pin message\n"
-        "/unpin - Unpin message\n"
-        "/promote - Promote user to admin\n"
-        "/demote - Demote admin to user\n"
-        "/lockdown - Lock group (only admins can message)"
+        "🤖 <b>Welcome to the Telegram Bot!</b>\n\n"
+        "I'm here to help manage your group with powerful moderation tools.\n\n"
+        "<b>Quick Start:</b>\n"
+        "• Tap <b>Help</b> to see available commands\n"
+        "• Tap <b>Status</b> to check system health\n"
+        "• Reply to any message with a command to act on it",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
     )
 
 
 async def cmd_help(message: Message):
     """Handle /help command"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Back", callback_data="start")]
+    ])
+    
     await message.answer(
-        "📖 **Bot Commands**\n\n"
-        "/start - Welcome message\n"
-        "/status - Check bot and API status\n"
-        "/ban - Ban a user (admin only)\n"
-        "/unban - Unban a user (admin only)\n"
-        "/kick - Kick a user (admin only)\n"
-        "/mute - Mute a user (admin only)\n"
-        "/unmute - Unmute a user (admin only)\n"
-        "/pin - Pin a message (admin only)\n"
-        "/unpin - Unpin a message (admin only)\n"
-        "/promote - Promote user to admin (admin only)\n"
-        "/demote - Demote admin to user (admin only)\n"
-        "/lockdown - Lock group (only admins can message, admin only)",
-        parse_mode=ParseMode.MARKDOWN
+        "📖 <b>Bot Commands</b>\n\n"
+        "<b>👮 Moderation Commands:</b>\n"
+        "/ban - Ban a user\n"
+        "/unban - Unban a user\n"
+        "/kick - Kick a user\n"
+        "/mute - Mute a user\n"
+        "/unmute - Unmute a user\n\n"
+        "<b>📌 Message Commands:</b>\n"
+        "/pin - Pin a message\n"
+        "/unpin - Unpin a message\n"
+        "/purge - Delete user messages\n\n"
+        "<b>👥 Role Commands:</b>\n"
+        "/promote - Promote to admin\n"
+        "/demote - Demote admin\n"
+        "/setrole - Set custom role\n"
+        "/removerole - Remove role\n\n"
+        "<b>⚙️ System Commands:</b>\n"
+        "/status - Check system status\n"
+        "/lockdown - Lock group\n"
+        "/warn - Warn user\n"
+        "/restrict - Restrict permissions",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
     )
 
 
@@ -201,18 +276,27 @@ async def cmd_status(message: Message):
     """Handle /status command"""
     try:
         is_healthy = await api_client.health_check()
-        status = "✅ Healthy" if is_healthy else "❌ Unhealthy"
+        status_emoji = "✅" if is_healthy else "❌"
+        status_text = "Healthy" if is_healthy else "Unhealthy"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data="status"),
+             InlineKeyboardButton(text="🏠 Home", callback_data="start")]
+        ])
         
         await message.answer(
-            f"🤖 **Bot Status**\n\n"
-            f"Bot: ✅ Running\n"
-            f"Centralized API: {status}\n"
-            f"Version: 1.0.0",
-            parse_mode=ParseMode.MARKDOWN
+            f"🤖 <b>Bot Status Report</b>\n\n"
+            f"<b>Bot Status:</b> ✅ Running\n"
+            f"<b>API Status:</b> {status_emoji} {status_text}\n"
+            f"<b>Version:</b> 1.0.0\n"
+            f"<b>Timestamp:</b> <code>{asyncio.get_event_loop().time():.0f}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
         )
     except Exception as e:
         logger.error(f"Status check failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await send_and_delete(message, f"❌ <b>Error:</b> {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
 
 
 async def cmd_ban(message: Message):
@@ -235,14 +319,18 @@ async def cmd_ban(message: Message):
             args = message.text.split(maxsplit=2)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/ban (reply to message)\n/ban <user_id|@username> [reason]")
+                await send_and_delete(message, 
+                    "Usage:\n/ban (reply to message)\n/ban &lt;user_id|@username&gt; [reason]",
+                    parse_mode=ParseMode.HTML, delay=5)
                 return
             
             user_id, _ = parse_user_reference(args[1])
             reason = args[2] if len(args) > 2 else "No reason"
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /ban <user_id|@username>")
+            await send_and_delete(message, 
+                "❌ Could not identify user. Reply to a message or use /ban &lt;user_id|@username&gt;",
+                parse_mode=ParseMode.HTML, delay=5)
             return
         
         action_data = {
@@ -256,13 +344,14 @@ async def cmd_ban(message: Message):
         result = await api_client.execute_action(action_data)
         
         if "error" in result:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await send_action_response(message, "ban", user_id, False, result.get("error"))
         else:
-            await message.answer(f"✅ User {user_id} has been banned")
+            await send_action_response(message, "ban", user_id, True)
             
     except Exception as e:
         logger.error(f"Ban command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await send_and_delete(message, f"❌ <b>Error:</b> {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML)
 
 
 async def cmd_unban(message: Message):
@@ -316,26 +405,25 @@ async def cmd_kick(message: Message):
         user_id = None
         reason = "No reason"
         
-        # Check if replying to a message
         if message.reply_to_message:
             user_id = await get_user_id_from_reply(message)
-            # Parse reason from command args if provided
             args = message.text.split(maxsplit=1)
             if len(args) > 1:
                 reason = args[1]
         else:
-            # Direct command with user_id or username
             args = message.text.split(maxsplit=2)
-            
             if len(args) < 2:
-                await message.answer("Usage:\n/kick (reply to message)\n/kick <user_id|@username> [reason]")
+                await send_and_delete(message, 
+                    "Usage:\n/kick (reply to message)\n/kick &lt;user_id|@username&gt; [reason]",
+                    parse_mode=ParseMode.HTML, delay=5)
                 return
-            
             user_id, _ = parse_user_reference(args[1])
             reason = args[2] if len(args) > 2 else "No reason"
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /kick <user_id|@username>")
+            await send_and_delete(message, 
+                "❌ Could not identify user.",
+                parse_mode=ParseMode.HTML, delay=5)
             return
         
         action_data = {
@@ -347,15 +435,15 @@ async def cmd_kick(message: Message):
         }
         
         result = await api_client.execute_action(action_data)
-        
         if "error" in result:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await send_action_response(message, "kick", user_id, False, result.get("error"))
         else:
-            await message.answer(f"✅ User {user_id} has been kicked")
+            await send_action_response(message, "kick", user_id, True)
             
     except Exception as e:
         logger.error(f"Kick command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML)
 
 
 async def cmd_mute(message: Message):
@@ -366,10 +454,8 @@ async def cmd_mute(message: Message):
         user_id = None
         duration = 0  # 0 = forever
         
-        # Check if replying to a message
         if message.reply_to_message:
             user_id = await get_user_id_from_reply(message)
-            # Parse duration from command args if provided
             args = message.text.split(maxsplit=1)
             if len(args) > 1:
                 try:
@@ -377,16 +463,13 @@ async def cmd_mute(message: Message):
                 except ValueError:
                     pass
         else:
-            # Direct command with user_id or username
             args = message.text.split(maxsplit=2)
-            
             if len(args) < 2:
-                await message.answer("Usage:\n/mute (reply to message)\n/mute <user_id|@username> [duration_minutes]")
+                await send_and_delete(message, 
+                    "Usage:\n/mute (reply to message)\n/mute &lt;user_id|@username&gt; [duration_minutes]",
+                    parse_mode=ParseMode.HTML, delay=5)
                 return
-            
             user_id, _ = parse_user_reference(args[1])
-            
-            # Parse duration if provided
             if len(args) > 2:
                 try:
                     duration = int(args[2])
@@ -394,7 +477,8 @@ async def cmd_mute(message: Message):
                     pass
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /mute <user_id|@username>")
+            await send_and_delete(message, "❌ Could not identify user.",
+                                 parse_mode=ParseMode.HTML, delay=5)
             return
         
         action_data = {
@@ -406,17 +490,17 @@ async def cmd_mute(message: Message):
         }
         
         result = await api_client.execute_action(action_data)
-        
         if "error" in result:
-            error_msg = html.escape(result['error'])
-            await message.answer(f"❌ Error: {error_msg}", parse_mode=None)
+            await send_action_response(message, "mute", user_id, False, result.get("error"))
         else:
             duration_text = "forever" if duration == 0 else f"for {duration} minutes"
-            await message.answer(f"✅ User {user_id} has been muted {duration_text}")
+            response = f"🔇 <b>User {user_id} has been muted {duration_text}</b>"
+            await send_and_delete(message, response, parse_mode=ParseMode.HTML)
             
     except Exception as e:
         logger.error(f"Mute command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML)
 
 
 async def cmd_unmute(message: Message):
