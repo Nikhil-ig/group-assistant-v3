@@ -56,8 +56,11 @@ echo ""
 # 2. Start Centralized API
 echo -e "${BLUE}2️⃣  Starting Centralized API on port 8000...${NC}"
 cd "$PROJECT_DIR"
+# Kill any lingering process on port 8000
+fuser -k 8000/tcp 2>/dev/null || true
+sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
-$PYTHON_BIN -m uvicorn centralized_api.app:app --reload --port 8000 > /tmp/api.log 2>&1 &
+$PYTHON_BIN -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8000 > /tmp/api.log 2>&1 &
 API_PID=$!
 sleep 3
 echo -e "${GREEN}✅ Centralized API started (PID: $API_PID)${NC}"
@@ -66,7 +69,7 @@ echo ""
 # 3. Start Web Service
 echo -e "${BLUE}3️⃣  Starting Web Service on port 8003...${NC}"
 cd "$PROJECT_DIR"
-$PYTHON_BIN -m uvicorn web.app:app --reload --port 8003 > /tmp/web.log 2>&1 &
+$PYTHON_BIN -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
 WEB_PID=$!
 sleep 2
 echo -e "${GREEN}✅ Web Service started (PID: $WEB_PID)${NC}"
