@@ -18,7 +18,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 # Copy Python dependencies from builder
-COPY --from=builder /root/.local /root/.local
+COPY --from=builder --chown=1000:1000 /root/.local /root/.local
 
 # Set environment variable for PATH
 ENV PATH=/root/.local/bin:$PATH
@@ -29,7 +29,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 COPY . .
 
 # Create non-root user for security
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /root/.local
 USER appuser
 
 # Health check
