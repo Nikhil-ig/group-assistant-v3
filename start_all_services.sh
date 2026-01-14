@@ -39,12 +39,24 @@ echo "║     V3 Microservices Startup - Starting All Services        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
-# Always pull latest code from git before starting services
-echo -e "${BLUE}🔄 Pulling latest code from git...${NC}"
-cd "$PROJECT_DIR" || exit 1
-git pull origin main
-echo -e "${GREEN}✅ Latest code pulled from git.${NC}"
-echo ""
+# Detect if running on VPS or local machine
+# VPS typically uses /opt or /home paths, local uses /Users (Mac) or /home/user (Linux home)
+IS_VPS=false
+if [[ "$PROJECT_DIR" == /opt/* ]] || [[ "$PROJECT_DIR" == /srv/* ]]; then
+    IS_VPS=true
+fi
+
+# Only auto-pull on VPS
+if [ "$IS_VPS" = true ]; then
+    echo -e "${BLUE}🔄 Pulling latest code from git (VPS deployment)...${NC}"
+    cd "$PROJECT_DIR" || exit 1
+    git pull origin main
+    echo -e "${GREEN}✅ Latest code pulled from git.${NC}"
+    echo ""
+else
+    echo -e "${YELLOW}ℹ️  Skipping git pull (local development mode)${NC}"
+    echo ""
+fi
 
 # Install/update dependencies
 echo -e "${BLUE}📦 Installing dependencies...${NC}"

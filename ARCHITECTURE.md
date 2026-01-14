@@ -46,20 +46,20 @@ V3 is a **production-grade microservices architecture** designed for:
      │ - Telegram   │          │ - Analytics      │
      └─────┬────────┘          └──────────┬───────┘
            │                              │
-           │  HTTP Requests              │
-           │  ┌──────────────────────────┘
+           │  HTTP Requests               │
+           │  ┌─────────────────────-─────┘
            │  │
      ┌─────▼──────────────────────────┐
      │  CENTRALIZED API SERVICE       │
      │  (Port 8000)                   │
      │                                │
-     │  ✅ RBAC Engine               │
-     │  ✅ User Management           │
-     │  ✅ Group Management          │
-     │  ✅ Audit Logging             │
-     │  ✅ Permission Checking       │
-     │  ✅ Data Persistence          │
-     │  ✅ Business Logic            │
+     │  ✅ RBAC Engine                │
+     │  ✅ User Management            │
+     │  ✅ Group Management           │
+     │  ✅ Audit Logging              │
+     │  ✅ Permission Checking        │
+     │  ✅ Data Persistence           │
+     │  ✅ Business Logic             │
      │                                │
      └─────┬────────────────┬─────────┘
            │                │
