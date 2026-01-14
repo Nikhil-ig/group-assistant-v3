@@ -56,7 +56,6 @@ services:
         condition: service_healthy
     volumes:
       - ./centralized_api:/app
-    command: python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: curl -f http://localhost:8000/api/health || exit 1
       interval: 10s
@@ -103,7 +102,6 @@ services:
         condition: service_healthy
     volumes:
       - ./web:/app
-    command: python -m uvicorn app:app --host 0.0.0.0 --port 8002 --reload
     healthcheck:
       test: curl -f http://localhost:8002/api/health || exit 1
       interval: 10s

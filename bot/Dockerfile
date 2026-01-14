@@ -4,8 +4,11 @@ FROM python:3.10-slim as builder
 WORKDIR /build
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --user --no-cache-dir -r requirements.txt
+# Install dependencies to a virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 
 # Final stage
@@ -16,11 +19,11 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Copy Python dependencies from builder
-COPY --from=builder --chown=1000:1000 /root/.local /root/.local
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
 
 # Set environment variable for PATH
-ENV PATH=/root/.local/bin:$PATH
+ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
@@ -28,7 +31,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 COPY . .
 
 # Create non-root user for security
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /root/.local
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /opt/venv
 USER appuser
 
 # Run application with restart capability
