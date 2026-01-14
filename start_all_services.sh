@@ -41,7 +41,7 @@ echo ""
 
 # Always pull latest code from git before starting services
 echo -e "${BLUE}🔄 Pulling latest code from git...${NC}"
-cd "$PROJECT_DIR"
+cd "$PROJECT_DIR" || exit 1
 git pull origin main
 echo -e "${GREEN}✅ Latest code pulled from git.${NC}"
 echo ""
@@ -86,7 +86,7 @@ echo ""
 
 # 2. Start Centralized API
 echo -e "${BLUE}2️⃣  Starting Centralized API on port 8001...${NC}"
-cd "$PROJECT_DIR"
+cd "$PROJECT_DIR" || exit 1
 if [ "$OS_TYPE" = "Darwin" ]; then
     # macOS: use lsof to kill process on port 8001
     lsof -ti :8001 | xargs kill -9 2>/dev/null || true
@@ -96,7 +96,7 @@ else
 fi
 sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
-$PYTHON_BIN -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8001 > /tmp/api.log 2>&1 &
+"$PYTHON_BIN" -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8001 > /tmp/api.log 2>&1 &
 API_PID=$!
 echo $API_PID > /tmp/api.pid
 sleep 3
@@ -105,9 +105,9 @@ echo ""
 
 # 3. Start Web Service
 echo -e "${BLUE}3️⃣  Starting Web Service on port 8003...${NC}"
-cd "$PROJECT_DIR"
+cd "$PROJECT_DIR" || exit 1
 export CENTRALIZED_API_URL="http://localhost:8001"
-$PYTHON_BIN -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
+"$PYTHON_BIN" -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
 WEB_PID=$!
 echo $WEB_PID > /tmp/web.pid
 sleep 2
@@ -118,8 +118,8 @@ echo ""
 echo -e "${BLUE}4️⃣  Starting Telegram Bot (polling)...${NC}"
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
 export CENTRALIZED_API_URL="http://localhost:8001"
-cd "$PROJECT_DIR"
-$PYTHON_BIN bot/main.py > /tmp/bot.log 2>&1 &
+cd "$PROJECT_DIR" || exit 1
+"$PYTHON_BIN" bot/main.py > /tmp/bot.log 2>&1 &
 BOT_PID=$!
 echo $BOT_PID > /tmp/bot.pid
 sleep 2
