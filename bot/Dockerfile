@@ -24,6 +24,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Set environment variable for PATH
 ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
