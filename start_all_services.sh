@@ -46,6 +46,15 @@ git pull origin main
 echo -e "${GREEN}✅ Latest code pulled from git.${NC}"
 echo ""
 
+# Install/update dependencies
+echo -e "${BLUE}📦 Installing dependencies...${NC}"
+"$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/requirements.txt" 2>/dev/null || true
+"$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/bot/requirements.txt" 2>/dev/null || true
+"$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/centralized_api/requirements.txt" 2>/dev/null || true
+"$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/web/requirements.txt" 2>/dev/null || true
+echo -e "${GREEN}✅ Dependencies installed.${NC}"
+echo ""
+
 # Color codes
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
