@@ -19,6 +19,13 @@ echo "║     V3 Microservices Startup - Using Docker Compose         ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
+# Determine if we need sudo for docker
+DOCKER_CMD="docker"
+if ! docker ps &>/dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  Docker requires sudo, using 'sudo docker'${NC}"
+    DOCKER_CMD="sudo docker"
+fi
+
 # Check if Docker is installed
 if ! command -v docker &> /dev/null; then
     echo -e "${RED}❌ Docker is not installed!${NC}"
@@ -27,7 +34,7 @@ if ! command -v docker &> /dev/null; then
 fi
 
 # Check if Docker Compose is installed
-if ! docker compose version &> /dev/null; then
+if ! $DOCKER_CMD compose version &> /dev/null; then
     echo -e "${RED}❌ Docker Compose is not installed!${NC}"
     echo "Please install Docker Compose from: https://docs.docker.com/compose/install/"
     exit 1
@@ -40,12 +47,12 @@ cd "$PROJECT_DIR"
 
 # Pull latest images
 echo -e "${BLUE}📥 Pulling latest Docker images...${NC}"
-docker compose pull 2>/dev/null || echo "⚠️  Some images may need to be built"
+$DOCKER_CMD compose pull 2>/dev/null || echo "⚠️  Some images may need to be built"
 echo ""
 
 # Start services
 echo -e "${BLUE}🚀 Starting all services...${NC}"
-docker compose up -d
+$DOCKER_CMD compose up -d
 
 echo -e "${GREEN}✅ Services started!${NC}"
 echo ""
@@ -63,7 +70,7 @@ echo ""
 # Show service status
 echo "📊 Service Status:"
 echo ""
-docker compose ps
+$DOCKER_CMD compose ps
 echo ""
 
 echo "🔗 Access Points:"
@@ -80,18 +87,18 @@ echo "  • Redis:           redis://redis:6379"
 echo ""
 
 echo "📝 View Logs:"
-echo "  • All logs:        docker compose logs -f"
-echo "  • API logs:        docker compose logs -f centralized-api"
-echo "  • Web logs:        docker compose logs -f web"
-echo "  • Bot logs:        docker compose logs -f bot"
-echo "  • MongoDB logs:    docker compose logs -f mongo"
-echo "  • Redis logs:      docker compose logs -f redis"
+echo "  • All logs:        $DOCKER_CMD compose logs -f"
+echo "  • API logs:        $DOCKER_CMD compose logs -f centralized-api"
+echo "  • Web logs:        $DOCKER_CMD compose logs -f web"
+echo "  • Bot logs:        $DOCKER_CMD compose logs -f bot"
+echo "  • MongoDB logs:    $DOCKER_CMD compose logs -f mongo"
+echo "  • Redis logs:      $DOCKER_CMD compose logs -f redis"
 echo ""
 
 echo "🛑 To stop all services, run:"
-echo "  docker compose down"
+echo "  $DOCKER_CMD compose down"
 echo ""
 
 echo "💾 To stop and remove all data, run:"
-echo "  docker compose down -v"
+echo "  $DOCKER_CMD compose down -v"
 echo ""
