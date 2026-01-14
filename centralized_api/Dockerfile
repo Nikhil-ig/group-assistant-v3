@@ -44,4 +44,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
 EXPOSE 8000
 
 # Run application with uvicorn directly
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "centralized_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
