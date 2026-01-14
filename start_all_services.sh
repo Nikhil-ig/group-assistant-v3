@@ -65,6 +65,7 @@ if [ "$OS_TYPE" = "Darwin" ]; then
     else
         mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
         MONGO_PID=$!
+        echo $MONGO_PID > /tmp/mongo.pid
         sleep 2
         echo -e "${GREEN}✅ MongoDB started (PID: $MONGO_PID)${NC}"
     fi
@@ -76,6 +77,7 @@ else
     else
         mongod --port 27018 --dbpath /tmp/mongo_data > /tmp/mongod.log 2>&1 &
         MONGO_PID=$!
+        echo $MONGO_PID > /tmp/mongo.pid
         sleep 2
         echo -e "${GREEN}✅ MongoDB started (PID: $MONGO_PID)${NC}"
     fi
@@ -96,6 +98,7 @@ sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
 $PYTHON_BIN -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8001 > /tmp/api.log 2>&1 &
 API_PID=$!
+echo $API_PID > /tmp/api.pid
 sleep 3
 echo -e "${GREEN}✅ Centralized API started (PID: $API_PID)${NC}"
 echo ""
@@ -106,6 +109,7 @@ cd "$PROJECT_DIR"
 export CENTRALIZED_API_URL="http://localhost:8001"
 $PYTHON_BIN -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
 WEB_PID=$!
+echo $WEB_PID > /tmp/web.pid
 sleep 2
 echo -e "${GREEN}✅ Web Service started (PID: $WEB_PID)${NC}"
 echo ""
@@ -117,6 +121,7 @@ export CENTRALIZED_API_URL="http://localhost:8001"
 cd "$PROJECT_DIR"
 $PYTHON_BIN bot/main.py > /tmp/bot.log 2>&1 &
 BOT_PID=$!
+echo $BOT_PID > /tmp/bot.pid
 sleep 2
 echo -e "${GREEN}✅ Telegram Bot started (PID: $BOT_PID)${NC}"
 echo ""
