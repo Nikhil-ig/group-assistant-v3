@@ -7,20 +7,30 @@ All bot and web services communicate through this API
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# Load environment variables from .env file
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(env_path, override=True)
 
 from centralized_api.config import API_PREFIX
 from centralized_api.db.mongodb import ActionDatabase
 from centralized_api.api.routes import router as action_router
 from centralized_api.api.simple_actions import router as simple_actions_router, set_executor
 from centralized_api.api.advanced_rbac_routes import register_advanced_rbac_routes
+from centralized_api.api.advanced_routes import router as advanced_router
+from centralized_api.api.web_control import web_router, set_database as set_web_database
 from centralized_api.services.executor import ActionExecutor
 from centralized_api.services.superadmin_service import SuperadminService
 from centralized_api.services.group_admin_service import GroupAdminService
+from centralized_api.config import MONGODB_URI, MONGODB_DATABASE
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # Configure logging
 logging.basicConfig(
@@ -36,17 +46,27 @@ _superadmin_service: Optional[SuperadminService] = None
 _group_admin_service: Optional[GroupAdminService] = None
 
 
-async def init_services():
+async def init_services(app: FastAPI):
     """Initialize all services on startup"""
     global _db, _executor, _superadmin_service, _group_admin_service
     
     try:
         logger.info("🚀 Initializing Centralized API services...")
         
-        # Initialize database
+        # Initialize database (synchronous ActionDatabase wrapper)
         _db = ActionDatabase()
         await _db.connect()
         logger.info("✅ MongoDB connected")
+
+        # Initialize an async Motor client and attach to app.state so
+        # other modules (advanced routes) can reuse it via app.state.motor_db
+        try:
+            motor_client = AsyncIOMotorClient(MONGODB_URI)
+            app.state.motor_client = motor_client
+            app.state.motor_db = motor_client[MONGODB_DATABASE]
+            logger.info("✅ Motor async MongoDB client initialized and attached to app.state")
+        except Exception as e:
+            logger.warning(f"Could not initialize motor client: {e}")
         
         # Initialize services (bot is optional for centralized API)
         _executor = ActionExecutor(bot=None, db=_db)
@@ -55,6 +75,9 @@ async def init_services():
         
         # Initialize simple actions executor (for bot compatibility)
         set_executor(_executor)
+        
+        # Initialize web control database (for web API)
+        set_web_database(_db)
         
         logger.info("✅ All services initialized successfully")
         
@@ -73,6 +96,19 @@ async def close_services():
         if _db:
             await _db.disconnect()
             logger.info("✅ MongoDB disconnected")
+        # Close motor client if present on app.state
+        try:
+            # app may not be available here; try to close any global motor client
+            # attached earlier to the app.state
+            # We check globals in case close_services is called without app context.
+            from fastapi import current_app
+            motor_client = getattr(current_app.state, "motor_client", None)
+            if motor_client:
+                motor_client.close()
+                logger.info("✅ Motor client closed")
+        except Exception:
+            # If current_app isn't available, attempt to find motor client global
+            pass
             
         logger.info("✅ All services closed successfully")
         
@@ -84,7 +120,7 @@ async def close_services():
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown"""
     # Startup
-    await init_services()
+    await init_services(app)
     yield
     # Shutdown
     await close_services()
@@ -164,8 +200,14 @@ app.include_router(action_router)
 # Simple actions routes (Port 8000/api/actions/execute)
 app.include_router(simple_actions_router)
 
+# Web control routes (Port 8000/api/web/...)
+app.include_router(web_router)
+
 # RBAC routes (Port 8000/api/rbac/...)
 register_advanced_rbac_routes(app)
+
+# Advanced routes (Port 8000/api/advanced/...)
+app.include_router(advanced_router)
 
 
 # ============================================================================

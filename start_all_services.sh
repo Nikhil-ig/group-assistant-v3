@@ -31,7 +31,7 @@ else
     exit 1
 fi
 
-TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-8366781443:AAHIXgGD1UXvPWw9EIDBlMk5Ktuhj2qQ8WU}"
+TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-8276429151:AAEWq4nE9hQcRgY4AcuLWFKW_z26Xcmk2gY}"
 
 
 echo "╔══════════════════════════════════════════════════════════════╗"
