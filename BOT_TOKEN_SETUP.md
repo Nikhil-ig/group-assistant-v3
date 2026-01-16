@@ -42,8 +42,8 @@ Replace the token in `bot/.env`:
 
 ```properties
 TELEGRAM_BOT_TOKEN=YOUR_NEW_TOKEN_HERE
-CENTRALIZED_API_URL=http://localhost:8001
-CENTRALIZED_API_KEY=shared-api-key
+API_V2_URL=http://localhost:8002
+API_V2_KEY=shared-api-key
 LOG_LEVEL=INFO
 ```
 
@@ -89,8 +89,8 @@ Location: `bot/.env`
 
 ```properties
 TELEGRAM_BOT_TOKEN=YOUR_TOKEN_HERE
-CENTRALIZED_API_URL=http://localhost:8001
-CENTRALIZED_API_KEY=shared-api-key
+API_V2_URL=http://localhost:8002
+API_V2_KEY=shared-api-key
 LOG_LEVEL=INFO
 ```
 

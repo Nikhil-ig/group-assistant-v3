@@ -19,7 +19,7 @@ elif command -v python3 &> /dev/null; then
         "$PROJECT_DIR/venv/bin/pip" install --upgrade pip
         "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/requirements.txt"
         "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/bot/requirements.txt"
-        "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/centralized_api/requirements.txt"
+        "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/api_v2/requirements.txt"
         "$PROJECT_DIR/venv/bin/pip" install -q -r "$PROJECT_DIR/web/requirements.txt"
         echo "✅ Virtual environment ready!"
     fi
@@ -62,7 +62,7 @@ fi
 echo -e "${BLUE}📦 Installing dependencies...${NC}"
 "$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/requirements.txt" 2>/dev/null || true
 "$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/bot/requirements.txt" 2>/dev/null || true
-"$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/centralized_api/requirements.txt" 2>/dev/null || true
+"$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/api_v2/requirements.txt" 2>/dev/null || true
 "$PYTHON_BIN" -m pip install -q -r "$PROJECT_DIR/web/requirements.txt" 2>/dev/null || true
 echo -e "${GREEN}✅ Dependencies installed.${NC}"
 echo ""
@@ -105,29 +105,29 @@ else
 fi
 echo ""
 
-# 2. Start Centralized API
-echo -e "${BLUE}2️⃣  Starting Centralized API on port 8001...${NC}"
+# 2. Start API V2
+echo -e "${BLUE}2️⃣  Starting API V2 on port 8002...${NC}"
 cd "$PROJECT_DIR" || exit 1
 if [ "$OS_TYPE" = "Darwin" ]; then
-    # macOS: use lsof to kill process on port 8001
-    lsof -ti :8001 | xargs kill -9 2>/dev/null || true
+    # macOS: use lsof to kill process on port 8002
+    lsof -ti :8002 | xargs kill -9 2>/dev/null || true
 else
     # Linux: use fuser
-    fuser -k 8001/tcp 2>/dev/null || true
+    fuser -k 8002/tcp 2>/dev/null || true
 fi
 sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
-"$PYTHON_BIN" -m uvicorn centralized_api.app:app --host 0.0.0.0 --reload --port 8001 > /tmp/api.log 2>&1 &
+"$PYTHON_BIN" -m uvicorn api_v2.app:app --host 0.0.0.0 --reload --port 8002 > /tmp/api.log 2>&1 &
 API_PID=$!
 echo $API_PID > /tmp/api.pid
 sleep 3
-echo -e "${GREEN}✅ Centralized API started (PID: $API_PID)${NC}"
+echo -e "${GREEN}✅ API V2 started (PID: $API_PID)${NC}"
 echo ""
 
 # 3. Start Web Service
 echo -e "${BLUE}3️⃣  Starting Web Service on port 8003...${NC}"
 cd "$PROJECT_DIR" || exit 1
-export CENTRALIZED_API_URL="http://localhost:8001"
+export API_V2_URL="http://localhost:8002"
 "$PYTHON_BIN" -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
 WEB_PID=$!
 echo $WEB_PID > /tmp/web.pid
@@ -138,7 +138,7 @@ echo ""
 # 4. Start Telegram Bot
 echo -e "${BLUE}4️⃣  Starting Telegram Bot (polling)...${NC}"
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
-export CENTRALIZED_API_URL="http://localhost:8001"
+export API_V2_URL="http://localhost:8002"
 cd "$PROJECT_DIR" || exit 1
 "$PYTHON_BIN" bot/main.py > /tmp/bot.log 2>&1 &
 BOT_PID=$!
@@ -160,9 +160,9 @@ echo -e "  ${GREEN}Web Service${NC}         PID: $WEB_PID   (port 8003)"
 echo -e "  ${GREEN}Telegram Bot${NC}        PID: $BOT_PID   (polling)"
 echo ""
 echo "🔗 Access Points:"
-echo "  • Centralized API: http://localhost:8001"
+echo "  • Centralized API: http://localhost:8002"
 echo "  • Web Service:     http://localhost:8003"
-echo "  • API Docs:        http://localhost:8001/docs"
+echo "  • API Docs:        http://localhost:8002/docs"
 echo "  • Web Docs:        http://localhost:8003/docs"
 echo ""
 echo "📝 Log Files:"

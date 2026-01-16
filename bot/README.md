@@ -1,22 +1,22 @@
 # Bot Service
 
-Independent Telegram bot service that communicates with centralized_api.
+Independent Telegram bot service that communicates with api_v2.
 
 ## 🤖 What This Service Does
 
 - **Handles Telegram Updates** - Polls for messages and commands
 - **Executes Bot Commands** - /admin_dashboard, /promote_user, etc.
-- **Validates Permissions** - Checks with centralized_api
+- **Validates Permissions** - Checks with api_v2
 - **Executes Moderation Actions** - Ban, kick, mute, promote users
-- **Streams Events** - Sends actions to centralized_api for logging
-- **Can be Deployed Independently** - On different server than centralized_api
+- **Streams Events** - Sends actions to api_v2 for logging
+- **Can be Deployed Independently** - On different server than api_v2
 
 ## 🏗️ Folder Structure
 
 ```
 bot/
 ├── main.py                  # Bot entry point and initialization
-├── client.py                # HTTP client for centralized_api
+├── client.py                # HTTP client for api_v2
 ├── config.py                # Configuration
 ├── handlers/                # Command handlers
 │   ├── __init__.py
@@ -50,7 +50,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with:
 # - TELEGRAM_BOT_TOKEN (from BotFather)
-# - CENTRALIZED_API_URL (where centralized_api is running)
+# - API_V2_URL (where api_v2 is running)
 ```
 
 ### 3. Run the Bot
@@ -71,12 +71,12 @@ User sends /command
 Bot receives update
     ↓
 Permission check
-    ├─ Call centralized_api/api/rbac/check-permission
+    ├─ Call api_v2/api/rbac/check-permission
     └─ Get result
     ↓
 If allowed:
     ├─ Execute command
-    ├─ Call centralized_api/api/actions/execute
+    ├─ Call api_v2/api/actions/execute
     └─ Log to audit
     ↓
 Send response to user
@@ -91,8 +91,8 @@ Edit `config.py` or `.env`:
 TELEGRAM_BOT_TOKEN = "your-bot-token-here"
 
 # API
-CENTRALIZED_API_URL = "http://localhost:8000"  # or production URL
-CENTRALIZED_API_KEY = "shared-api-key"
+API_V2_URL = "http://localhost:8002"  # or production URL
+API_V2_KEY = "shared-api-key"
 
 # Logging
 LOG_LEVEL = "INFO"
@@ -136,12 +136,12 @@ Commands require:
 ## 🛠️ Key Classes
 
 ### BotClient
-HTTP client for communicating with centralized_api:
+HTTP client for communicating with api_v2:
 
 ```python
 from bot.client import BotClient
 
-client = BotClient(base_url="http://localhost:8000")
+client = BotClient(base_url="http://localhost:8002")
 
 # Check permission
 allowed = await client.check_permission(
@@ -170,7 +170,7 @@ router = Router()
 
 @router.message(Command("admin_dashboard"))
 async def admin_dashboard(message: types.Message):
-    # Get user permission from centralized_api
+    # Get user permission from api_v2
     # Display dashboard
     # Log action
     pass
@@ -187,7 +187,7 @@ docker build -t telegram-bot .
 # Run container
 docker run \
   -e TELEGRAM_BOT_TOKEN=your-token \
-  -e CENTRALIZED_API_URL=http://centralized-api:8000 \
+  -e API_V2_URL=http://api-v2:8002 \
   telegram-bot
 ```
 
@@ -218,7 +218,7 @@ pytest tests/test_handlers.py
 pytest tests/ --cov=.
 ```
 
-## 🔄 Integration with centralized_api
+## 🔄 Integration with api_v2
 
 ### 1. Create Client
 
@@ -249,7 +249,7 @@ class BotClient:
 from bot.client import BotClient
 
 client = BotClient(
-    base_url="http://localhost:8000",
+    base_url="http://localhost:8002",
     api_key="shared-api-key"
 )
 
@@ -285,10 +285,10 @@ async def safe_api_call(coroutine):
     try:
         return await asyncio.wait_for(coroutine, timeout=5.0)
     except httpx.TimeoutException:
-        logger.error("centralized_api timeout")
+        logger.error("api_v2 timeout")
         return None
     except httpx.ConnectionError:
-        logger.error("centralized_api connection error")
+        logger.error("api_v2 connection error")
         return None
     except Exception as e:
         logger.error(f"API call failed: {e}")
@@ -309,22 +309,22 @@ Error: Invalid token provided
 ```
 Solution: Get valid token from BotFather, update .env
 
-### Cannot Connect to centralized_api
+### Cannot Connect to api_v2
 ```
-Error: Connection refused to http://localhost:8000
+Error: Connection refused to http://localhost:8002
 ```
-Solution: Start centralized_api first, check CENTRALIZED_API_URL
+Solution: Start api_v2 first, check API_V2_URL
 
 ### Command Not Working
 ```
 User: /admin_dashboard
 Bot: No response
 ```
-Solution: Check logs, verify permissions in centralized_api
+Solution: Check logs, verify permissions in api_v2
 
 ## 🎯 Features
 
-- ✅ Full RBAC integration with centralized_api
+- ✅ Full RBAC integration with api_v2
 - ✅ Permission checking on all commands
 - ✅ Moderation actions (ban, kick, mute)
 - ✅ Batch operations support
@@ -335,7 +335,7 @@ Solution: Check logs, verify permissions in centralized_api
 ## 🔄 Status
 
 ✅ Ready for deployment
-✅ Fully integrated with centralized_api
+✅ Fully integrated with api_v2
 ✅ Independent scalability
 🔜 Advanced features (auto-moderation, ML)
 

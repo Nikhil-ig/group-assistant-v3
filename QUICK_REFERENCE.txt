@@ -152,8 +152,8 @@ Error Handling:
 ### Environment Variables
 ```bash
 export TELEGRAM_BOT_TOKEN="your_token_here"
-export CENTRALIZED_API_URL="http://localhost:8001"
-export CENTRALIZED_API_KEY="shared-api-key"
+export API_V2_URL="http://localhost:8002"
+export API_V2_KEY="shared-api-key"
 export SETTINGS_CACHE_TTL="30"           # seconds
 export SETTINGS_REFRESH_INTERVAL="15"    # seconds
 export LOG_LEVEL="INFO"                   # DEBUG for verbose
@@ -349,7 +349,7 @@ Read `IMPLEMENTATION_STATUS.md` → Deployment Checklist section
 
 ### Still Stuck?
 1. Check logs: `tail -f logs/bot/bot.log`
-2. Test API: `curl http://localhost:8001/api/health`
+2. Test API: `curl http://localhost:8002/api/health`
 3. Check DB: `mongo` → `db.group_settings.findOne()`
 4. Read troubleshooting section in CALLBACK_TESTING_GUIDE.md
 

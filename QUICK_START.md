@@ -5,9 +5,9 @@
 All 9 critical files have been created and verified:
 
 ```
-✅ centralized_api/app.py        (6.0K)  - FastAPI entry point
-✅ centralized_api/requirements.txt       - 11 dependencies
-✅ centralized_api/Dockerfile             - Container build
+✅ api_v2/app.py        (6.0K)  - FastAPI entry point
+✅ api_v2/requirements.txt       - 11 dependencies
+✅ api_v2/Dockerfile             - Container build
 
 ✅ bot/main.py                   (12K)   - Aiogram bot
 ✅ bot/requirements.txt                   - 5 dependencies  
@@ -38,7 +38,7 @@ This starts:
 
 **Terminal 1 - Centralized API:**
 ```bash
-cd v3/centralized_api
+cd v3/api_v2
 pip install -r requirements.txt
 python -m uvicorn app:app --reload
 ```
@@ -62,15 +62,15 @@ python -m uvicorn app:app --reload --port 8002
 
 ```bash
 # Test Centralized API
-curl http://localhost:8000/
-curl http://localhost:8000/api/health
+curl http://localhost:8002/
+curl http://localhost:8002/api/health
 
 # Test Web Service
 curl http://localhost:8002/
 curl http://localhost:8002/api/health
 
 # View API documentation
-# Visit: http://localhost:8000/docs
+# Visit: http://localhost:8002/docs
 # Visit: http://localhost:8002/docs
 ```
 
@@ -85,7 +85,7 @@ curl http://localhost:8002/api/health
 
 ### Bot Service (Port 8001)
 - ✅ 7 commands: /start, /help, /status, /ban, /kick, /mute, /unmute
-- ✅ HTTP client to centralized_api
+- ✅ HTTP client to api_v2
 - ✅ Aiogram 3.0 async polling
 - ✅ Telegram integration
 
@@ -102,7 +102,7 @@ Create `.env` file in `v3/` directory:
 
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
-CENTRALIZED_API_URL=http://localhost:8000
+API_V2_URL=http://localhost:8002
 API_KEY=shared-api-key
 SECRET_KEY=your-secret-key-change-in-production
 JWT_SECRET=your-jwt-secret
@@ -118,7 +118,7 @@ docker-compose down
 
 # View logs
 docker-compose logs -f
-docker-compose logs -f centralized-api
+docker-compose logs -f api-v2
 docker-compose logs -f bot
 docker-compose logs -f web
 ```
@@ -134,14 +134,14 @@ docker-compose ps
 1. ✅ All services are ready to run
 2. Set TELEGRAM_BOT_TOKEN in .env
 3. Run: `docker-compose up`
-4. Visit: http://localhost:8000/docs
+4. Visit: http://localhost:8002/docs
 5. Test endpoints
 
 ## 📚 Documentation
 
 - `README.md` - Architecture overview
 - `ARCHITECTURE.md` - Detailed technical design
-- `centralized_api/README.md` - API service docs
+- `api_v2/README.md` - API service docs
 - `bot/README.md` - Bot service docs
 - `web/README.md` - Web service docs
 

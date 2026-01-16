@@ -3,6 +3,8 @@ Advanced MongoDB Database Service
 Handles all CRUD operations for settings, members, admins, roles, history, and events
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -15,15 +17,15 @@ logger = logging.getLogger(__name__)
 class AdvancedDBService:
     """Advanced MongoDB service for bot data persistence"""
     
-    def __init__(self, db: AsyncIOMotorDatabase):
+    def __init__(self, db: Any):
         self.db = db
-        self.settings_collection: AsyncIOMotorCollection = db["group_settings"]
-        self.members_collection: AsyncIOMotorCollection = db["members"]
-        self.admins_collection: AsyncIOMotorCollection = db["admins"]
-        self.roles_collection: AsyncIOMotorCollection = db["moderation_roles"]
-        self.command_history_collection: AsyncIOMotorCollection = db["command_history"]
-        self.event_logs_collection: AsyncIOMotorCollection = db["event_logs"]
-        self.statistics_collection: AsyncIOMotorCollection = db["group_statistics"]
+        self.settings_collection = db["group_settings"]
+        self.members_collection = db["members"]
+        self.admins_collection = db["admins"]
+        self.roles_collection = db["moderation_roles"]
+        self.command_history_collection = db["command_history"]
+        self.event_logs_collection = db["event_logs"]
+        self.statistics_collection = db["group_statistics"]
     
     # ========================================================================
     # GROUP SETTINGS

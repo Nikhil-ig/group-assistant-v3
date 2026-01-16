@@ -43,13 +43,13 @@ chmod +x deploy-vps.sh
 # Create bot/.env
 cat > bot/.env <<'EOF'
 TELEGRAM_BOT_TOKEN=your_actual_token_from_botfather
-CENTRALIZED_API_URL=http://centralized_api:8000
-CENTRALIZED_API_KEY=your_shared_api_key_here
+API_V2_URL=http://api_v2:8002
+API_V2_KEY=your_shared_api_key_here
 LOG_LEVEL=INFO
 EOF
 
-# Create centralized_api/.env
-cat > centralized_api/.env <<'EOF'
+# Create api_v2/.env
+cat > api_v2/.env <<'EOF'
 MONGODB_URL=mongodb://root:your_password@mongo:27017/telegram_bot?authSource=admin
 REDIS_URL=redis://:your_password@redis:6379/0
 API_KEY=your_shared_api_key_here
@@ -59,7 +59,7 @@ DEBUG=false
 EOF
 
 # Secure .env files
-chmod 600 bot/.env centralized_api/.env
+chmod 600 bot/.env api_v2/.env
 
 # Test deployment
 ./deploy-vps.sh
@@ -176,11 +176,11 @@ git log --oneline | head
 
 These exist ONLY on VPS:
 - `bot/.env` ← Your Telegram bot token
-- `centralized_api/.env` ← Database passwords
+- `api_v2/.env` ← Database passwords
 
 These are safe to commit:
 - `bot/.env.example` ← Template (no real values)
-- `centralized_api/.env.example` ← Template (no real values)
+- `api_v2/.env.example` ← Template (no real values)
 - `deploy-vps.sh` ← Deployment script
 - `webhook-receiver.sh` ← Webhook listener
 - `VPS_DEPLOYMENT.md` ← Full documentation
@@ -199,6 +199,6 @@ See `VPS_DEPLOYMENT.md` for complete setup guide.
 |-------|---------|
 | Services won't start | `docker compose logs` |
 | Bot not responding | `docker compose logs bot` |
-| API errors | `docker compose logs centralized_api` |
+| API errors | `docker compose logs api_v2` |
 | Deployment failed | `tail -f /var/log/group-assistant-deploy.log` |
 | Webhook not working | `sudo journalctl -u webhook -f` |

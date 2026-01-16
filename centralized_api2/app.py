@@ -26,6 +26,10 @@ from centralized_api.api.simple_actions import router as simple_actions_router, 
 from centralized_api.api.advanced_rbac_routes import register_advanced_rbac_routes
 from centralized_api.api.advanced_routes import router as advanced_router
 from centralized_api.api.web_control import web_router, set_database as set_web_database
+from centralized_api.api.dashboard_routes import router as dashboard_router, set_database as set_dashboard_database
+from centralized_api.api.group_auto_register_routes import router as group_auto_register_router, set_db as set_auto_register_db
+from centralized_api.api.professional_api import router as professional_api_router, set_db_manager
+from centralized_api.core.database import init_db_manager, close_db_manager
 from centralized_api.services.executor import ActionExecutor
 from centralized_api.services.superadmin_service import SuperadminService
 from centralized_api.services.group_admin_service import GroupAdminService
@@ -68,6 +72,14 @@ async def init_services(app: FastAPI):
         except Exception as e:
             logger.warning(f"Could not initialize motor client: {e}")
         
+        # Initialize professional DatabaseManager (for v1 API)
+        try:
+            await init_db_manager(app.state.motor_db)
+            logger.info("✅ Professional DatabaseManager initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize DatabaseManager: {e}")
+        
+        
         # Initialize services (bot is optional for centralized API)
         _executor = ActionExecutor(bot=None, db=_db)
         _superadmin_service = SuperadminService(db=_db)
@@ -78,6 +90,12 @@ async def init_services(app: FastAPI):
         
         # Initialize web control database (for web API)
         set_web_database(_db)
+        
+        # Initialize dashboard database (for dashboard API)
+        set_dashboard_database(app.state.motor_db)
+        
+        # Initialize auto-registration database (for group auto-registration)
+        set_auto_register_db(app.state.motor_db)
         
         logger.info("✅ All services initialized successfully")
         
@@ -193,6 +211,12 @@ async def root():
 # ============================================================================
 # INCLUDE ROUTERS
 # ============================================================================
+
+# Dashboard routes (Port 8000/api/dashboard/...)
+app.include_router(dashboard_router)
+
+# Group auto-registration routes (Port 8000/api/groups/...)
+app.include_router(group_auto_register_router)
 
 # Action execution routes (Port 8000/api/actions/...)
 app.include_router(action_router)

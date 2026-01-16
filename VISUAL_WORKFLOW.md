@@ -7,7 +7,7 @@
 │                         YOUR MAC (VS Code)                          │
 │                                                                     │
 │  1. Edit code in VS Code                                           │
-│     └─ bot/main.py, centralized_api/app.py, etc.                 │
+│     └─ bot/main.py, api_v2/app.py, etc.                 │
 │                                                                     │
 │  2. Commit changes                                                  │
 │     └─ git add .                                                   │
@@ -60,12 +60,12 @@
 │                                                                     │
 │  .env Files (Local Only, Never Committed):                        │
 │  ├─ bot/.env (TELEGRAM_BOT_TOKEN)                               │
-│  └─ centralized_api/.env (DB passwords)                          │
+│  └─ api_v2/.env (DB passwords)                          │
 │                                                                     │
 │  Logs:                                                              │
 │  ├─ /var/log/group-assistant-deploy.log                          │
 │  ├─ docker compose logs -f bot                                   │
-│  └─ docker compose logs -f centralized_api                       │
+│  └─ docker compose logs -f api_v2                       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -163,7 +163,7 @@ This project is designed to work both on your Mac (for local development) and on
 │   ├── main.py (loads bot/.env automatically)
 │   ├── requirements.txt
 │   └── .env.example (template)
-├── centralized_api/
+├── api_v2/
 │   ├── app.py
 │   ├── requirements.txt
 │   └── .env.example (template)
@@ -184,7 +184,7 @@ This project is designed to work both on your Mac (for local development) and on
 │   ├── main.py (same as GitHub)
 │   ├── requirements.txt
 │   └── .env ✨ (YOUR SECRETS - never committed!)
-├── centralized_api/
+├── api_v2/
 │   ├── app.py (same as GitHub)
 │   ├── requirements.txt
 │   └── .env ✨ (YOUR SECRETS - never committed!)
@@ -205,8 +205,8 @@ Your Secrets (VPS Only):
 ┌─────────────────────────────────────────────┐
 │ bot/.env (NOT in GitHub)                    │
 │ TELEGRAM_BOT_TOKEN=8366781443:AAH...       │
-│ CENTRALIZED_API_URL=http://...             │
-│ CENTRALIZED_API_KEY=your_key               │
+│ API_V2_URL=http://...             │
+│ API_V2_KEY=your_key               │
 │ LOG_LEVEL=INFO                             │
 └─────────────────────────────────────────────┘
 
@@ -214,8 +214,8 @@ Safe Templates (In GitHub):
 ┌─────────────────────────────────────────────┐
 │ bot/.env.example (no real values)           │
 │ TELEGRAM_BOT_TOKEN=your_token_here         │
-│ CENTRALIZED_API_URL=http://...             │
-│ CENTRALIZED_API_KEY=your_key               │
+│ API_V2_URL=http://...             │
+│ API_V2_KEY=your_key               │
 │ LOG_LEVEL=INFO                             │
 └─────────────────────────────────────────────┘
 ```

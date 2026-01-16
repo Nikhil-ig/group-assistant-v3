@@ -268,8 +268,8 @@ All 2,497 lines of code compiled successfully with no syntax errors.
 
 ### Environment Variables Required
 - `TELEGRAM_BOT_TOKEN` - Telegram bot token
-- `CENTRALIZED_API_URL` - URL to centralized API (default: http://localhost:8000)
-- `CENTRALIZED_API_KEY` - Shared API key
+- `API_V2_URL` - URL to centralized API (default: http://localhost:8002)
+- `API_V2_KEY` - Shared API key
 - `SETTINGS_CACHE_TTL` - Cache time-to-live in seconds (default: 30)
 - `SETTINGS_REFRESH_INTERVAL` - Background refresh interval in seconds (default: 15)
 

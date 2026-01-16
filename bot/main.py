@@ -1,6 +1,6 @@
 """
 Telegram Bot Service - Main Entry Point
-Independent bot service that communicates with centralized_api via HTTP
+Independent bot service that communicates with api_v2 via HTTP
 Handles all Telegram updates and commands
 """
 
@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CENTRALIZED_API_URL = os.getenv("CENTRALIZED_API_URL", "http://localhost:8000")
-CENTRALIZED_API_KEY = os.getenv("CENTRALIZED_API_KEY", "shared-api-key")
+API_V2_URL = os.getenv("API_V2_URL", "http://localhost:8002")
+API_V2_KEY = os.getenv("API_V2_KEY", "shared-api-key")
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN not set in environment variables")
@@ -108,8 +108,8 @@ def decode_callback_data(callback_id: str) -> Optional[dict]:
 # BOT CLIENT FOR CENTRALIZED API
 # ============================================================================
 
-class CentralizedAPIClient:
-    """HTTP client for communicating with centralized_api"""
+class APIv2Client:
+    """HTTP client for communicating with api_v2"""
     
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
@@ -121,11 +121,11 @@ class CentralizedAPIClient:
         self._cache_ttl = int(os.getenv("SETTINGS_CACHE_TTL", "30"))  # seconds
     
     async def health_check(self) -> bool:
-        """Check if centralized_api is healthy"""
+        """Check if api_v2 is healthy"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{self.base_url}/api/health",
+                    f"{self.base_url}/health",
                     timeout=self.timeout
                 )
                 return response.status_code == 200
@@ -134,11 +134,41 @@ class CentralizedAPIClient:
             return False
     
     async def execute_action(self, action_data: dict) -> dict:
-        """Execute an action through centralized_api"""
+        """Execute an action through api_v2
+        
+        Routes to specific endpoint based on action_type:
+        - ban, unban, kick, mute, unmute, warn, promote, demote, restrict, unrestrict, lockdown
+        """
         try:
+            group_id = action_data.get("group_id")
+            action_type = action_data.get("action_type", "").lower()
+            
+            if not group_id:
+                return {"error": "group_id required in action_data"}
+            
+            # Map action_type to endpoint
+            action_endpoints = {
+                "ban": f"/api/v2/groups/{group_id}/enforcement/ban",
+                "unban": f"/api/v2/groups/{group_id}/enforcement/unban",
+                "kick": f"/api/v2/groups/{group_id}/enforcement/kick",
+                "mute": f"/api/v2/groups/{group_id}/enforcement/mute",
+                "unmute": f"/api/v2/groups/{group_id}/enforcement/unmute",
+                "warn": f"/api/v2/groups/{group_id}/enforcement/warn",
+                "promote": f"/api/v2/groups/{group_id}/enforcement/promote",
+                "demote": f"/api/v2/groups/{group_id}/enforcement/demote",
+                "restrict": f"/api/v2/groups/{group_id}/enforcement/restrict",
+                "unrestrict": f"/api/v2/groups/{group_id}/enforcement/unrestrict",
+                "lockdown": f"/api/v2/groups/{group_id}/enforcement/lockdown",
+            }
+            
+            endpoint = action_endpoints.get(action_type)
+            if not endpoint:
+                # Fallback to generic execute endpoint
+                endpoint = f"/api/v2/groups/{group_id}/enforcement/execute"
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self.base_url}/api/actions/execute",
+                    f"{self.base_url}{endpoint}",
                     json=action_data,
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=self.timeout
@@ -150,7 +180,7 @@ class CentralizedAPIClient:
             return {"error": str(e)}
     
     async def get_user_permissions(self, user_id: int, group_id: int) -> dict:
-        """Get user permissions from centralized_api"""
+        """Get user permissions from api_v2"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -166,7 +196,7 @@ class CentralizedAPIClient:
             return {"error": str(e)}
 
     async def get_group_settings(self, group_id: int) -> dict:
-        """Fetch group settings from centralized API (advanced settings)
+        """Fetch group settings from API v2
         Returns a dict with at least a `features_enabled` mapping.
         """
         # Check cache first
@@ -184,14 +214,12 @@ class CentralizedAPIClient:
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
-                    f"{self.base_url}/api/advanced/settings/{group_id}",
+                    f"{self.base_url}/api/v2/groups/{group_id}/settings",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=self.timeout
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                # API wraps data under data key
-                settings = data.get("data") if isinstance(data, dict) else data
+                settings = resp.json()
 
                 # store in cache
                 try:
@@ -313,21 +341,19 @@ class CentralizedAPIClient:
         """Get action history for a specific user in a group"""
         try:
             async with httpx.AsyncClient() as client:
-                # Fetch history for the entire group first
+                # Fetch violations/history for specific user
                 response = await client.get(
-                    f"{self.base_url}/api/actions/history",
-                    params={"group_id": group_id, "limit": limit},
+                    f"{self.base_url}/api/v2/groups/{group_id}/enforcement/user/{user_id}/violations",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=self.timeout
                 )
                 response.raise_for_status()
                 data = response.json()
                 
-                # Filter for specific user on client side
-                all_actions = data.get("actions", []) if isinstance(data, dict) else []
-                user_actions = [a for a in all_actions if isinstance(a, dict) and a.get("user_id") == user_id]
+                # Extract violations list
+                violations = data.get("violations", []) if isinstance(data, dict) else []
                 
-                return {"actions": user_actions}
+                return {"actions": violations}
         except Exception as e:
             logger.error(f"Failed to fetch action history for user {user_id}: {e}")
             return {"actions": []}
@@ -416,7 +442,7 @@ class CentralizedAPIClient:
         admin_id: int,
         action_type: str
     ) -> dict:
-        """NEW: Comprehensive pre-action validation including:
+        """Comprehensive pre-action validation including:
         1. Duplicate prevention (user not already restricted)
         2. Admin permission checks (admin can perform action)
         3. Target user status
@@ -431,19 +457,27 @@ class CentralizedAPIClient:
         """
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/actions/check-pre-action",
-                    params={
+                # Use duplicate detection endpoint
+                response = await client.post(
+                    f"{self.base_url}/api/v2/groups/{group_id}/moderation/duplicate-detection",
+                    json={
                         "user_id": user_id,
-                        "group_id": group_id,
-                        "admin_id": admin_id,
-                        "action_type": action_type,
+                        "action_type": action_type
                     },
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=self.timeout
                 )
                 response.raise_for_status()
-                return response.json()
+                result = response.json()
+                
+                # Map response to expected format
+                return {
+                    "can_proceed": result.get("can_proceed", True),
+                    "status": result.get("status", "ok"),
+                    "reason": result.get("reason", ""),
+                    "checks": result.get("checks", {}),
+                    "current_restrictions": result.get("current_restrictions", [])
+                }
         except Exception as e:
             logger.warning(f"Failed to validate pre-action: {e}")
             # Fail open - allow action if validation fails
@@ -456,12 +490,18 @@ class CentralizedAPIClient:
             }
 
 
-def escape_error_message(error_msg: str) -> str:
+def escape_error_message(error_msg) -> str:
     """Escape HTML special characters in error messages for safe Telegram delivery"""
-    return html.escape(error_msg)
+    if error_msg is None:
+        return "Unknown error"
+    try:
+        return html.escape(str(error_msg))
+    except Exception as e:
+        logger.error(f"Error escaping message: {error_msg}, {e}")
+        return "Error processing error message"
 
 
-async def get_user_stats_display(user_id: int, group_id: int, api_client: 'CentralizedAPIClient') -> dict:
+async def get_user_stats_display(user_id: int, group_id: int, api_client: 'APIv2Client') -> dict:
     """
     Fetch real user statistics from database and format for display.
     Returns dict with: {warning_count, mute_count, kick_count, ban_status, restrict_status, etc.}
@@ -544,7 +584,7 @@ async def get_user_stats_display(user_id: int, group_id: int, api_client: 'Centr
         }
 
 
-async def check_user_current_status(user_id: int, group_id: int, api_client: 'CentralizedAPIClient', action_type: str, admin_id: int = 0) -> str:
+async def check_user_current_status(user_id: int, group_id: int, api_client: 'APIv2Client', action_type: str, admin_id: int = 0) -> str:
     """
     Comprehensive pre-action validation.
     Checks:
@@ -791,7 +831,7 @@ def build_action_keyboard(action: str, user_id: int, group_id: int) -> InlineKey
 # Global instances
 bot: Optional[Bot] = None
 dispatcher: Optional[Dispatcher] = None
-api_client: Optional[CentralizedAPIClient] = None
+api_client: Optional[APIv2Client] = None
 # Pending template edits: keys are (chat_id, user_id) -> field name
 pending_template_edits: dict[tuple[int, int], str] = {}
 # Background task for settings refresh
@@ -1124,7 +1164,7 @@ async def cmd_ban(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await send_action_response(message, "ban", user_id, False, result.get("error"))
             await log_command_execution(message, "ban", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1170,7 +1210,7 @@ async def cmd_unban(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
         else:
             await message.answer(f"✅ User {user_id} has been unbanned")
@@ -1223,7 +1263,7 @@ async def cmd_kick(message: Message):
         }
         
         result = await api_client.execute_action(action_data)
-        if "error" in result:
+        if result.get("error") is not None:
             await send_action_response(message, "kick", user_id, False, result.get("error"))
             await log_command_execution(message, "kick", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1286,7 +1326,7 @@ async def cmd_mute(message: Message):
         }
         
         result = await api_client.execute_action(action_data)
-        if "error" in result:
+        if result.get("error") is not None:
             await send_action_response(message, "mute", user_id, False, result.get("error"))
             await log_command_execution(message, "mute", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1361,7 +1401,7 @@ async def cmd_unmute(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await send_action_response(message, "unmute", user_id, False, result.get("error"))
             await log_command_execution(message, "unmute", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1384,7 +1424,7 @@ async def cmd_unmute(message: Message):
             try:
                 sent_msg = await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=keyboard)
                 # Action messages with buttons are NOT auto-deleted - user can interact with them
-                await log_command_execution(message, "unmute", success=True, result=None, args=message.text)
+                await log_command_execution(message, "unmute", success=True, result="User unmuted successfully", args=message.text)
             except Exception as e:
                 logger.error(f"Failed to send unmute response: {e}")
                 await log_command_execution(message, "unmute", success=False, result=str(e), args=message.text)
@@ -1432,7 +1472,7 @@ async def cmd_pin(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "pin", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1480,7 +1520,7 @@ async def cmd_unpin(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "unpin", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1528,6 +1568,8 @@ async def cmd_promote(message: Message):
             await message.answer("❌ Could not identify user. Reply to a message or use /promote <user_id|@username>")
             return
         
+        logger.info(f"BOT DEBUG: Promoting user_id={user_id} with title={title}")
+        logger.info(f"BOT DEBUG: Promoting user_id={user_id} with title={title}")
         action_data = {
             "action_type": "promote",
             "group_id": message.chat.id,
@@ -1538,7 +1580,7 @@ async def cmd_promote(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "promote", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1589,7 +1631,7 @@ async def cmd_demote(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "demote", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1618,7 +1660,7 @@ async def cmd_lockdown(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "lockdown", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1676,7 +1718,7 @@ async def cmd_warn(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "warn", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1734,7 +1776,7 @@ async def cmd_restrict(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "restrict", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1785,7 +1827,7 @@ async def cmd_unrestrict(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
             await log_command_execution(message, "unrestrict", success=False, result=result.get("error"), args=message.text)
         else:
@@ -1850,7 +1892,7 @@ async def cmd_purge(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
         else:
             await message.answer(f"🗑️ Purged {count} messages from user {user_id}")
@@ -1906,7 +1948,7 @@ async def cmd_setrole(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
         else:
             await message.answer(f"👤 User {user_id} assigned role: {role}")
@@ -1962,7 +2004,7 @@ async def cmd_removerole(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
         else:
             await message.answer(f"👤 Role {role} removed from user {user_id}")
@@ -1981,7 +2023,7 @@ async def cmd_removerole(message: Message):
         
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
         else:
             await message.answer(f"👤 Role {role} removed from user {user_id}")
@@ -2564,7 +2606,7 @@ async def handle_callback(callback_query: CallbackQuery):
         # Execute action via API
         result = await api_client.execute_action(action_data)
         
-        if "error" in result:
+        if result.get("error") is not None:
             error_notification = (
                 f"⚠️ <b>ACTION FAILED</b>\n\n"
                 f"<b>Action:</b> {action.upper()}\n"
@@ -2801,9 +2843,9 @@ async def setup_bot():
         logger.info("🚀 Starting Telegram Bot...")
         
         # Initialize API client
-        api_client = CentralizedAPIClient(CENTRALIZED_API_URL, CENTRALIZED_API_KEY)
+        api_client = APIv2Client(API_V2_URL, API_V2_KEY)
         
-        # Check if centralized_api is healthy
+        # Check if api_v2 is healthy
         is_healthy = await api_client.health_check()
         if not is_healthy:
             logger.warning("⚠️ Centralized API is not healthy, continuing anyway...")
