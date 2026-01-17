@@ -3,7 +3,7 @@
 # Keep service-specific requirement files for isolated installs if needed.
 
 aiogram==3.24.0
-aioredis==2.0.1
+redis>=5.0.0
 # aiohttp: aiogram 3.24.0 requires aiohttp>=3.9.0,<3.14
 aiohttp>=3.9,<3.14
 typing-extensions>=4.8.0

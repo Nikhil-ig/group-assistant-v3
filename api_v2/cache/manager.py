@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional, Any, Dict
 from datetime import timedelta
-import aioredis
+import redis.asyncio as aioredis
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
