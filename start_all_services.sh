@@ -117,7 +117,7 @@ else
 fi
 sleep 1
 export TELEGRAM_BOT_TOKEN="$TELEGRAM_TOKEN"
-"$PYTHON_BIN" -m uvicorn api_v2.app:app --host 0.0.0.0 --reload --port 8002 > /tmp/api.log 2>&1 &
+"$PYTHON_BIN" -m uvicorn api_v2.app:app --host 0.0.0.0 --port 8002 > /tmp/api.log 2>&1 &
 API_PID=$!
 echo $API_PID > /tmp/api.pid
 sleep 3
@@ -128,7 +128,7 @@ echo ""
 echo -e "${BLUE}3️⃣  Starting Web Service on port 8003...${NC}"
 cd "$PROJECT_DIR" || exit 1
 export API_V2_URL="http://localhost:8002"
-"$PYTHON_BIN" -m uvicorn web.app:app --host 0.0.0.0 --reload --port 8003 > /tmp/web.log 2>&1 &
+"$PYTHON_BIN" -m uvicorn web.app:app --host 0.0.0.0 --port 8003 > /tmp/web.log 2>&1 &
 WEB_PID=$!
 echo $WEB_PID > /tmp/web.pid
 sleep 2

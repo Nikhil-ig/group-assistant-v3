@@ -1,0 +1,54 @@
+[Unit]
+Description=Telegram Bot V3 - Advanced Moderation Bot with Microservices
+Documentation=file:///v3/BOT_V2_ULTRA_DEPLOYMENT_GUIDE.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=forking
+User=root
+Group=root
+WorkingDirectory=/v3
+
+# Startup
+ExecStartPre=/usr/bin/mkdir -p /tmp/mongo_data
+ExecStart=/v3/start_all_services.sh
+ExecStop=/v3/stop_all_services.sh
+
+# Restart policy
+Restart=always
+RestartSec=15
+StartLimitAction=reboot
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+Environment="PATH=/v3/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+# Resource limits (prevent runaway processes)
+MemoryLimit=2G
+MemoryAccounting=true
+CPUQuota=150%
+CPUAccounting=true
+
+# Timeout settings
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-bot-v3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+
+# Run in foreground (systemd manages the process)
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
