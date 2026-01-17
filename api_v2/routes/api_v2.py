@@ -4,13 +4,20 @@ API V2 Routes - Professional REST API for all operations
 
 import uuid
 import logging
-from datetime import datetime
+import os
+from pymongo import MongoClient
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Depends, Body
 from typing import List, Dict, Any
 
 from api_v2.models.schemas import *
 from api_v2.services.business_logic import *
 from api_v2.core.database import get_db_manager
+
+
+# Database connection
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+client = MongoClient(MONGODB_URL)
 
 router = APIRouter(prefix="/api/v2", tags=["api-v2"])
 
@@ -109,13 +116,65 @@ async def update_group(group_id: int, group: GroupUpdate):
 
 
 @router.get("/groups/{group_id}/stats", response_model=Dict[str, Any])
-async def get_group_stats(group_id: int):
-    """Get group statistics"""
+async def get_group_stats(group_id: int, days: int = 7):
+    """Get group statistics for the last N days"""
     try:
-        group_service = get_group_service()
-        result = await group_service.get_group_stats(group_id)
-        return {"success": True, "data": result}
+        # Access database directly
+        db = client["group_assistant"]
+        
+        # Calculate date range
+        end_date = datetime.utcnow()
+        start_date = end_date - timedelta(days=min(max(days, 1), 365))
+        
+        # Get message count
+        messages = db["messages"].count_documents({
+            "group_id": group_id,
+            "created_at": {"$gte": start_date, "$lte": end_date}
+        })
+        
+        # Get active users
+        active_users = len(db["messages"].distinct("user_id", {
+            "group_id": group_id,
+            "created_at": {"$gte": start_date, "$lte": end_date}
+        }))
+        
+        # Get admin actions count
+        actions = db["actions"].count_documents({
+            "group_id": group_id,
+            "created_at": {"$gte": start_date, "$lte": end_date}
+        })
+        
+        # Get most active user
+        pipeline = [
+            {"$match": {
+                "group_id": group_id,
+                "created_at": {"$gte": start_date, "$lte": end_date}
+            }},
+            {"$group": {
+                "_id": "$user_id",
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"count": -1}},
+            {"$limit": 1}
+        ]
+        most_active = list(db["messages"].aggregate(pipeline))
+        
+        return {
+            "success": True,
+            "data": {
+                "group_id": group_id,
+                "period_days": days,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "total_messages": messages,
+                "active_users": active_users,
+                "admin_actions": actions,
+                "most_active_user": most_active[0]["_id"] if most_active else None,
+                "most_active_count": most_active[0]["count"] if most_active else 0
+            }
+        }
     except Exception as e:
+        logger.error(f"Get group stats error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

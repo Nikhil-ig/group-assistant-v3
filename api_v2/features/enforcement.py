@@ -147,6 +147,13 @@ class EnforcementEngine:
     async def _execute_action_internal(self, action: EnforcementAction) -> Dict[str, Any]:
         """Internal action execution logic"""
         action_type = action.action_type
+        
+        # Ensure action_type is the enum, not a string
+        if isinstance(action_type, str):
+            try:
+                action_type = ActionType(action_type)
+            except ValueError:
+                raise ValueError(f"Unknown action type: {action_type}")
 
         # Handle different action types
         if action_type == ActionType.BAN:

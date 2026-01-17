@@ -23,6 +23,11 @@ from api_v2.cache import init_cache_manager, close_cache_manager
 from api_v2.routes.api_v2 import router as api_v2_router
 from api_v2.routes.enforcement_endpoints import router as enforcement_router
 from api_v2.routes.history import router as history_router
+from api_v2.routes.analytics import router as analytics_router
+from api_v2.routes.moderation_advanced import router as moderation_advanced_router
+from api_v2.routes.whitelist_blacklist import router as whitelist_blacklist_router
+from api_v2.routes.night_mode import router as night_mode_router
+from api_v2.routes.message_operations import router as message_operations_router
 # Advanced features disabled for now - have circular dependencies
 # from api_v2.routes.advanced_features import router as advanced_features_router, set_engines
 # from api_v2.routes.enforcement import router as enforcement_router, set_enforcement_engine
@@ -143,10 +148,18 @@ async def health_check():
 app.include_router(api_v2_router)
 app.include_router(enforcement_router)
 app.include_router(history_router)
+app.include_router(analytics_router)
+app.include_router(moderation_advanced_router)
+app.include_router(whitelist_blacklist_router)
+app.include_router(night_mode_router)
+app.include_router(message_operations_router)
+app.include_router(moderation_advanced_router)
+app.include_router(whitelist_blacklist_router)
+app.include_router(night_mode_router)
+app.include_router(whitelist_blacklist_router)
 # Advanced features disabled for now - have circular dependencies
 # app.include_router(advanced_features_router)
 # app.include_router(enforcement_router)
-app.include_router(history_router)
 
 
 # ============================================================================

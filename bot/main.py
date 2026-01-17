@@ -489,6 +489,56 @@ class APIv2Client:
                 "current_restrictions": []
             }
 
+    async def post(self, endpoint: str, data: dict) -> dict:
+        """Generic POST method for API V2 requests
+        
+        Args:
+            endpoint: API endpoint path (e.g., "/groups/123/messages/delete")
+            data: JSON data to send in POST body
+            
+        Returns:
+            Response JSON as dict
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/api/v2{endpoint}" if not endpoint.startswith("/api/") else f"{self.base_url}{endpoint}"
+                response = await client.post(
+                    url,
+                    json=data,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"POST request to {endpoint} failed: {e}")
+            return {"error": str(e), "success": False}
+
+    async def get(self, endpoint: str, params: dict = None) -> dict:
+        """Generic GET method for API V2 requests
+        
+        Args:
+            endpoint: API endpoint path (e.g., "/groups/123/messages/broadcasts")
+            params: Optional query parameters
+            
+        Returns:
+            Response JSON as dict
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/api/v2{endpoint}" if not endpoint.startswith("/api/") else f"{self.base_url}{endpoint}"
+                response = await client.get(
+                    url,
+                    params=params,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"GET request to {endpoint} failed: {e}")
+            return {"error": str(e), "success": False}
+
 
 def escape_error_message(error_msg) -> str:
     """Escape HTML special characters in error messages for safe Telegram delivery"""
@@ -914,6 +964,59 @@ async def check_is_admin(user_id: int, group_id: int) -> bool:
     return False
 
 
+async def check_moderator_permission(user_id: int, group_id: int, power: str) -> bool:
+    """
+    Check if user is whitelisted moderator with specific power
+    Returns True if:
+    1. User is actual admin, OR
+    2. User is whitelisted as moderator with the required power
+    
+    power: "mute", "unmute", "warn", "kick", "send_link", "restrict", "unrestrict", etc.
+    """
+    # Check if actual admin first
+    if await check_is_admin(user_id, group_id):
+        return True
+    
+    # Check whitelist for moderator powers
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{api_client.base_url}/api/v2/groups/{group_id}/whitelist/{user_id}",
+                headers={"Authorization": f"Bearer {api_client.api_key}"},
+                timeout=5
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("whitelisted") and data.get("entry_type") == "moderator":
+                    powers = data.get("admin_powers", [])
+                    return power in powers
+    except Exception as e:
+        logger.debug(f"Error checking moderator permissions: {e}")
+    
+    return False
+
+
+async def is_user_exempt(user_id: int, group_id: int) -> bool:
+    """Check if user is whitelisted for exemption (bypass restrictions)"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{api_client.base_url}/api/v2/groups/{group_id}/whitelist/{user_id}",
+                headers={"Authorization": f"Bearer {api_client.api_key}"},
+                timeout=5
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("whitelisted") and data.get("entry_type") == "exemption":
+                    return True
+    except Exception as e:
+        logger.debug(f"Error checking exemption: {e}")
+    
+    return False
+
+
 # ============================================================================
 # COMMAND HANDLERS
 # ============================================================================
@@ -1049,10 +1152,11 @@ async def cmd_status(message: Message):
 
 
 async def cmd_settings(message: Message):
-    """Handle /settings command - show toggles for auto-delete features (admins only)"""
+    """Enhanced /settings command - show toggles for auto-delete features OR advanced admin panel for user actions"""
     try:
         # Only allow in groups
         chat_id = message.chat.id
+        
         # Check admin status
         is_admin = False
         try:
@@ -1070,6 +1174,80 @@ async def cmd_settings(message: Message):
             await send_and_delete(message, "❌ You must be an admin to change settings.", parse_mode=ParseMode.HTML, delay=6)
             return
 
+        # Check if /settings is used with a target user (advanced admin panel)
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split(maxsplit=1)) > 1 else []
+        target_user_id = None
+        
+        # Try to get target user from arguments or reply
+        if args:
+            arg = args[0]
+            if arg.startswith("@"):
+                # Username provided
+                try:
+                    user_chat = await bot.get_chat(arg)
+                    target_user_id = user_chat.id
+                except Exception:
+                    await send_and_delete(message, f"❌ User {arg} not found", parse_mode=ParseMode.HTML, delay=6)
+                    return
+            else:
+                # Try to parse as user ID
+                try:
+                    target_user_id = int(arg)
+                except ValueError:
+                    await send_and_delete(message, "❌ Invalid user ID format", parse_mode=ParseMode.HTML, delay=6)
+                    return
+        elif message.reply_to_message:
+            # Use replied message user
+            target_user_id = message.reply_to_message.from_user.id
+        
+        # If target user specified, show advanced admin panel
+        if target_user_id:
+            from bot.advanced_admin_panel import format_admin_panel_message, build_advanced_toggle_keyboard
+            
+            try:
+                # Get user data
+                user_data = await get_user_data(target_user_id)
+                first_name = user_data.get("first_name", "Unknown") if user_data else "Unknown"
+                username = user_data.get("username") if user_data else None
+                
+                # Format beautiful admin panel message
+                panel_message = await format_admin_panel_message(
+                    {"first_name": first_name, "username": username},
+                    target_user_id,
+                    chat_id,
+                    message.from_user.id
+                )
+                
+                # Build keyboard
+                keyboard = await build_advanced_toggle_keyboard(target_user_id, chat_id)
+                
+                # Send panel message (reply to original message if it's a reply)
+                if message.reply_to_message:
+                    await message.reply_to_message.reply_text(
+                        panel_message,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
+                else:
+                    await message.answer(
+                        panel_message,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
+                
+                # Delete the command message
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                    
+                return
+            except Exception as e:
+                logger.error(f"Advanced admin panel error: {e}")
+                await send_and_delete(message, f"❌ Error opening admin panel: {escape_error_message(str(e))}", parse_mode=ParseMode.HTML, delay=6)
+                return
+        
+        # Otherwise, show group settings panel (original behavior)
         settings = await api_client.get_group_settings(chat_id)
         features = settings.get("features_enabled", {}) if isinstance(settings, dict) else {}
 
@@ -1105,7 +1283,8 @@ async def cmd_settings(message: Message):
             f"<b>Group ID:</b> <code>{chat_id}</code>\n\n"
             f"<b>Welcome template:</b>\n<code>{html.escape(welcome_template)}</code>\n\n"
             f"<b>Left template:</b>\n<code>{html.escape(left_template)}</code>\n\n"
-            f"Tap a toggle to enable/disable the feature or edit templates.\n"
+            f"Tap a toggle to enable/disable the feature or edit templates.\n\n"
+            f"<b>💡 Tip:</b> Use <code>/settings @username</code> to open the Advanced Admin Panel for a user!"
         )
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
@@ -1281,8 +1460,11 @@ async def cmd_mute(message: Message):
     Usage: /mute (reply to message) or /mute <user_id|@username> [duration_minutes]
     """
     try:
-        # Permission check: ensure caller is admin
-        if not await check_is_admin(message.from_user.id, message.chat.id):
+        # Permission check: ensure caller is admin OR has mute power
+        is_admin = await check_is_admin(message.from_user.id, message.chat.id)
+        is_moderator = await check_moderator_permission(message.from_user.id, message.chat.id, "mute")
+        
+        if not (is_admin or is_moderator):
             await send_and_delete(message, "❌ You need admin permissions for this action",
                                  parse_mode=ParseMode.HTML, delay=5)
             return
@@ -1367,8 +1549,11 @@ async def cmd_unmute(message: Message):
     Usage: /unmute (reply to message) or /unmute <user_id|@username>
     """
     try:
-        # Permission check: ensure caller is admin
-        if not await check_is_admin(message.from_user.id, message.chat.id):
+        # Permission check: ensure caller is admin OR has unmute power
+        is_admin = await check_is_admin(message.from_user.id, message.chat.id)
+        is_moderator = await check_moderator_permission(message.from_user.id, message.chat.id, "unmute")
+        
+        if not (is_admin or is_moderator):
             await send_and_delete(message, "❌ You need admin permissions for this action",
                                  parse_mode=ParseMode.HTML, delay=5)
             return
@@ -1672,13 +1857,45 @@ async def cmd_lockdown(message: Message):
         await message.answer(f"❌ Error: {escape_error_message(str(e))}")
 
 
+async def cmd_unlock(message: Message):
+    """Handle /unlock command - Unlock group (restore all member permissions)"""
+    try:
+        # Permission check: ensure caller is admin
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(message, "❌ You need admin permissions for this action",
+                                 parse_mode=ParseMode.HTML, delay=5)
+            return
+        
+        action_data = {
+            "action_type": "unlock",
+            "group_id": message.chat.id,
+            "initiated_by": message.from_user.id
+        }
+        
+        result = await api_client.execute_action(action_data)
+        
+        if result.get("error") is not None:
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await log_command_execution(message, "unlock", success=False, result=result.get("error"), args=message.text)
+        else:
+            await message.answer(f"🔓 Group has been unlocked. Members can now send messages normally.")
+            await log_command_execution(message, "unlock", success=True, result=None, args=message.text)
+            
+    except Exception as e:
+        logger.error(f"Unlock command failed: {e}")
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+
+
 async def cmd_warn(message: Message):
     """Handle /warn command - Warn user
     Usage: /warn (reply to message) or /warn <user_id|@username> [reason]
     """
     try:
-        # Permission check: ensure caller is admin
-        if not await check_is_admin(message.from_user.id, message.chat.id):
+        # Permission check: ensure caller is admin OR has warn power
+        is_admin = await check_is_admin(message.from_user.id, message.chat.id)
+        is_moderator = await check_moderator_permission(message.from_user.id, message.chat.id, "warn")
+        
+        if not (is_admin or is_moderator):
             await send_and_delete(message, "❌ You need admin permissions for this action",
                                  parse_mode=ParseMode.HTML, delay=5)
             return
@@ -1731,8 +1948,8 @@ async def cmd_warn(message: Message):
 
 
 async def cmd_restrict(message: Message):
-    """Handle /restrict command - Restrict user permissions
-    Usage: /restrict (reply to message) or /restrict <user_id|@username> [permission_type]
+    """Handle /restrict command - Show permission toggle buttons (smart on/off toggles)
+    Usage: /restrict (reply to message) or /restrict <user_id|@username>
     """
     try:
         # Permission check: ensure caller is admin
@@ -1742,46 +1959,93 @@ async def cmd_restrict(message: Message):
             return
         
         user_id = None
-        perm_type = "send_messages"  # default
         
         # Check if replying to a message
         if message.reply_to_message:
             user_id = await get_user_id_from_reply(message)
-            # Parse permission type from command args if provided
-            args = message.text.split(maxsplit=1)
-            if len(args) > 1:
-                perm_type = args[1]
         else:
             # Direct command with user_id or username
-            args = message.text.split(maxsplit=2)
+            args = message.text.split(maxsplit=1)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/restrict (reply to message)\n/restrict <user_id|@username> [permission_type]")
+                await message.answer("Usage:\n/restrict (reply to message)\n/restrict <user_id|@username>")
                 return
             
             user_id, _ = parse_user_reference(args[1])
-            perm_type = args[2] if len(args) > 2 else "send_messages"
         
         if not user_id:
             await message.answer("❌ Could not identify user. Reply to a message or use /restrict <user_id|@username>")
             return
         
-        action_data = {
-            "action_type": "restrict",
-            "group_id": message.chat.id,
-            "user_id": user_id,
-            "metadata": {"permission_type": perm_type},
-            "initiated_by": message.from_user.id
-        }
+        # Fetch current permission states
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{message.chat.id}/users/{user_id}/permissions",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    perms = resp.json().get("data", {})
+                    text_locked = not perms.get("can_send_messages", True)
+                    stickers_locked = not perms.get("can_send_other_messages", True)
+                    voice_locked = not perms.get("can_send_audios", True)
+                else:
+                    # If can't fetch, assume all unlocked
+                    text_locked = stickers_locked = voice_locked = False
+        except Exception as e:
+            logger.warning(f"Could not fetch permissions: {e}, assuming all unlocked")
+            text_locked = stickers_locked = voice_locked = False
         
-        result = await api_client.execute_action(action_data)
+        # Show toggle buttons based on current state
+        # Each button shows the ACTION (lock if free, free if locked)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"📝 Text: {'🔓 Lock' if text_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_text_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎨 Stickers: {'🔓 Lock' if stickers_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_stickers_{user_id}_{message.chat.id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🎬 GIFs: {'🔓 Lock' if stickers_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_gifs_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎤 Voice: {'🔓 Lock' if voice_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_voice_{user_id}_{message.chat.id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="� Toggle All",
+                    callback_data=f"toggle_perm_all_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"toggle_cancel_{user_id}_{message.chat.id}"),
+            ]
+        ])
         
-        if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
-            await log_command_execution(message, "restrict", success=False, result=result.get("error"), args=message.text)
-        else:
-            await message.answer(f"🔒 User {user_id} restricted from {perm_type}")
-            await log_command_execution(message, "restrict", success=True, result=None, args=message.text)
+        text = (
+            f"� <b>PERMISSION TOGGLES</b>\n\n"
+            f"<b>User ID:</b> <code>{user_id}</code>\n"
+            f"<b>Group ID:</b> <code>{message.chat.id}</code>\n\n"
+            f"<b>Current State:</b>\n"
+            f"• 📝 Text: {'🔒 LOCKED' if text_locked else '🔓 UNLOCKED'}\n"
+            f"• 🎨 Stickers: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
+            f"• 🎬 GIFs: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
+            f"• 🎤 Voice: {'🔒 LOCKED' if voice_locked else '🔓 UNLOCKED'}\n\n"
+            f"<b>Click button to toggle permission (ON/OFF):</b>\n"
+            f"• Button shows the action it will perform\n"
+            f"• � Lock = Click to LOCK (turn OFF)\n"
+            f"• 🔒 Free = Click to FREE (turn ON)\n"
+        )
+        
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await log_command_execution(message, "restrict", success=True, result="Permission toggles displayed", args=message.text)
             
     except Exception as e:
         logger.error(f"Restrict command failed: {e}")
@@ -1789,7 +2053,7 @@ async def cmd_restrict(message: Message):
 
 
 async def cmd_unrestrict(message: Message):
-    """Handle /unrestrict command - Unrestrict user (restore permissions)
+    """Handle /unrestrict command - Show permission toggle buttons (smart on/off toggles)
     Usage: /unrestrict (reply to message) or /unrestrict <user_id|@username>
     """
     try:
@@ -1818,26 +2082,268 @@ async def cmd_unrestrict(message: Message):
             await message.answer("❌ Could not identify user. Reply to a message or use /unrestrict <user_id|@username>")
             return
         
-        action_data = {
-            "action_type": "unrestrict",
-            "group_id": message.chat.id,
-            "user_id": user_id,
-            "initiated_by": message.from_user.id
-        }
+        # Fetch current permission states
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{message.chat.id}/users/{user_id}/permissions",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    perms = resp.json().get("data", {})
+                    text_locked = not perms.get("can_send_messages", True)
+                    stickers_locked = not perms.get("can_send_other_messages", True)
+                    voice_locked = not perms.get("can_send_audios", True)
+                else:
+                    # If can't fetch, assume all unlocked
+                    text_locked = stickers_locked = voice_locked = False
+        except Exception as e:
+            logger.warning(f"Could not fetch permissions: {e}, assuming all unlocked")
+            text_locked = stickers_locked = voice_locked = False
         
-        result = await api_client.execute_action(action_data)
+        # Show toggle buttons based on current state
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"📝 Text: {'� Lock' if text_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_text_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎨 Stickers: {'� Lock' if stickers_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_stickers_{user_id}_{message.chat.id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🎬 GIFs: {'� Lock' if stickers_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_gifs_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎤 Voice: {'� Lock' if voice_locked else '🔒 Free'}",
+                    callback_data=f"toggle_perm_voice_{user_id}_{message.chat.id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Toggle All",
+                    callback_data=f"toggle_perm_all_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"toggle_cancel_{user_id}_{message.chat.id}"),
+            ]
+        ])
         
-        if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
-            await log_command_execution(message, "unrestrict", success=False, result=result.get("error"), args=message.text)
-        else:
-            await message.answer(f"✅ User {user_id} unrestricted - permissions restored")
-            await log_command_execution(message, "unrestrict", success=True, result=None, args=message.text)
+        text = (
+            f"� <b>PERMISSION TOGGLES</b>\n\n"
+            f"<b>User ID:</b> <code>{user_id}</code>\n"
+            f"<b>Group ID:</b> <code>{message.chat.id}</code>\n\n"
+            f"<b>Current State:</b>\n"
+            f"• 📝 Text: {'🔒 LOCKED' if text_locked else '🔓 UNLOCKED'}\n"
+            f"• 🎨 Stickers: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
+            f"• 🎬 GIFs: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
+            f"• 🎤 Voice: {'🔒 LOCKED' if voice_locked else '🔓 UNLOCKED'}\n\n"
+            f"<b>Click button to toggle permission (ON/OFF):</b>\n"
+            f"• Button shows the action it will perform\n"
+            f"• 🔓 Lock = Click to LOCK (turn OFF)\n"
+            f"• 🔒 Free = Click to FREE (turn ON)\n"
+        )
+        
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await log_command_execution(message, "unrestrict", success=True, result="Permission toggles displayed", args=message.text)
             
     except Exception as e:
         logger.error(f"Unrestrict command failed: {e}")
         await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
 
+
+
+async def cmd_free(message: Message):
+    """Handle /free command - Enhanced permission & content-type management
+    
+    Shows detailed permission toggles for managing specific content types:
+    - Text messages (on/off)
+    - Stickers (on/off)
+    - GIFs (on/off)
+    - Media (photos, videos, documents)
+    - Voice messages (on/off)
+    - Links/URLs (on/off)
+    
+    Also shows night mode status and exemption status
+    
+    Usage: /free (reply to message) or /free <user_id|@username>
+    """
+    try:
+        # Permission check: ensure caller is admin
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(message, "❌ You need admin permissions for this action",
+                                 parse_mode=ParseMode.HTML, delay=5)
+            return
+        
+        user_id = None
+        
+        # Check if replying to a message
+        if message.reply_to_message:
+            user_id = await get_user_id_from_reply(message)
+        else:
+            # Direct command with user_id or username
+            args = message.text.split(maxsplit=1)
+            
+            if len(args) < 2:
+                await message.answer("Usage:\n/free (reply to message)\n/free <user_id|@username>")
+                return
+            
+            user_id, _ = parse_user_reference(args[1])
+        
+        if not user_id:
+            await message.answer("❌ Could not identify user. Reply to a message or use /free <user_id|@username>")
+            return
+        
+        # Fetch current permission states
+        text_allowed = True
+        stickers_allowed = True
+        gifs_allowed = True
+        media_allowed = True
+        voice_allowed = True
+        links_allowed = True
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{message.chat.id}/users/{user_id}/permissions",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    perms = resp.json().get("data", {})
+                    text_allowed = bool(perms.get("can_send_messages", True))
+                    stickers_allowed = bool(perms.get("can_send_other_messages", True))
+                    gifs_allowed = bool(perms.get("can_send_other_messages", True))
+                    media_allowed = bool(perms.get("can_send_media_messages", True))
+                    voice_allowed = bool(perms.get("can_send_voice_notes", True))
+                    links_allowed = bool(perms.get("can_add_web_page_previews", True))
+        except Exception as e:
+            logger.warning(f"Could not fetch permissions: {e}, assuming all allowed")
+        
+        # Check night mode exemption status
+        is_exempt = False
+        is_exempt_role = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{message.chat.id}/night-mode/check/{user_id}/text",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    nm_data = resp.json()
+                    is_exempt = bool(nm_data.get("is_exempt", False))
+                    is_exempt_role = nm_data.get("exempt_type") == "role" if "exempt_type" in nm_data else False
+        except Exception as e:
+            logger.debug(f"Could not check night mode exemption: {e}")
+        
+        # Check night mode status
+        night_mode_active = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{message.chat.id}/night-mode/status",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    nm_status = resp.json()
+                    night_mode_active = bool(nm_status.get("is_active", False))
+        except Exception as e:
+            logger.debug(f"Could not check night mode status: {e}")
+        
+        # Build comprehensive permission toggles keyboard
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            # Row 1: Text & Stickers
+            [
+                InlineKeyboardButton(
+                    text=f"📝 Text: {'✅ ON' if text_allowed else '❌ OFF'}",
+                    callback_data=f"toggle_perm_text_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎨 Stickers: {'✅ ON' if stickers_allowed else '❌ OFF'}",
+                    callback_data=f"toggle_perm_stickers_{user_id}_{message.chat.id}"
+                ),
+            ],
+            # Row 2: GIFs & Media
+            [
+                InlineKeyboardButton(
+                    text=f"🎬 GIFs: {'✅ ON' if gifs_allowed else '❌ OFF'}",
+                    callback_data=f"toggle_perm_gifs_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"📸 Media: {'✅ ON' if media_allowed else '❌ OFF'}",
+                    callback_data=f"toggle_perm_media_{user_id}_{message.chat.id}"
+                ),
+            ],
+            # Row 3: Voice & Links
+            [
+                InlineKeyboardButton(
+                    text=f"🎤 Voice: {'✅ ON' if voice_allowed else '❌ OFF'}",
+                    callback_data=f"toggle_perm_voice_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🔗 Links: {'✅ ON' if links_allowed else '❌ OFF'}",
+                    callback_data=f"toggle_perm_links_{user_id}_{message.chat.id}"
+                ),
+            ],
+            # Row 4: Action buttons
+            [
+                InlineKeyboardButton(
+                    text="🔄 Toggle All",
+                    callback_data=f"toggle_perm_all_{user_id}_{message.chat.id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Cancel",
+                    callback_data=f"toggle_cancel_{user_id}_{message.chat.id}"
+                ),
+            ]
+        ])
+        
+        # Build detailed status message
+        exemption_status = ""
+        if is_exempt:
+            if is_exempt_role:
+                exemption_status = "  🎖️  <i>Exempt by role</i>\n"
+            else:
+                exemption_status = "  ⭐ <i>Personally exempt</i>\n"
+        
+        night_mode_indicator = ""
+        if night_mode_active:
+            night_mode_indicator = f"\n🌙 <b>Night Mode Status:</b> <code>ACTIVE</code> {exemption_status}"
+        
+        text = (
+            f"╔═══════════════════════════════════════╗\n"
+            f"║ 🔓 <b>CONTENT PERMISSIONS</b>          ║\n"
+            f"╚═══════════════════════════════════════╝\n\n"
+            f"<b>Target User:</b> <code>{user_id}</code>\n"
+            f"<b>Group:</b> <code>{message.chat.id}</code>\n\n"
+            f"<b>📊 Permission State:</b>\n"
+            f"  📝 Text: <code>{'ALLOWED ✅' if text_allowed else 'BLOCKED ❌'}</code>\n"
+            f"  🎨 Stickers: <code>{'ALLOWED ✅' if stickers_allowed else 'BLOCKED ❌'}</code>\n"
+            f"  🎬 GIFs: <code>{'ALLOWED ✅' if gifs_allowed else 'BLOCKED ❌'}</code>\n"
+            f"  📸 Media: <code>{'ALLOWED ✅' if media_allowed else 'BLOCKED ❌'}</code>\n"
+            f"  🎤 Voice: <code>{'ALLOWED ✅' if voice_allowed else 'BLOCKED ❌'}</code>\n"
+            f"  🔗 Links: <code>{'ALLOWED ✅' if links_allowed else 'BLOCKED ❌'}</code>\n"
+            f"{night_mode_indicator}"
+            f"\n<b>💡 How to Use:</b>\n"
+            f"  • Click any button to toggle that content type\n"
+            f"  • ✅ ON = User can send this type\n"
+            f"  • ❌ OFF = User cannot send this type\n"
+            f"  • 🔄 Toggle All = Quick reverse all perms\n"
+        )
+        
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await log_command_execution(message, "free", success=True, result="Enhanced permission toggles displayed", args=message.text)
+            
+    except Exception as e:
+        logger.error(f"Free command failed: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
 
 async def cmd_purge(message: Message):
     """Handle /purge command - Delete multiple messages from user
@@ -1900,6 +2406,1055 @@ async def cmd_purge(message: Message):
     except Exception as e:
         logger.error(f"Purge command failed: {e}")
         await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+
+
+# ==================== MESSAGE DELETION COMMAND (ULTRA ADVANCED) ====================
+
+async def cmd_del(message: Message):
+    """
+    🗑️ ULTRA-ADVANCED Message Deletion Command - Enterprise-grade features
+    
+    Basic Modes:
+    ⚡ /del (reply)                    - Delete single message
+    ⚡ /del (reply) reason             - Delete with reason
+    ⚡ /del bulk <count>               - Delete last N messages
+    
+    Advanced Modes:
+    🔥 /del user <user_id>             - Delete all user's messages
+    🔥 /del clear --confirm            - Clear entire thread
+    🔥 /del archive                    - Archive + delete
+    
+    Ultra Modes:
+    ⚡⚡ /del filter <keyword>          - Delete messages with keyword
+    ⚡⚡ /del range <start> <end>       - Delete message range
+    ⚡⚡ /del spam --auto               - Auto-detect & delete spam
+    ⚡⚡ /del links --remove            - Delete all links/URLs
+    ⚡⚡ /del media                     - Delete all media messages
+    ⚡⚡ /del recent <minutes>          - Delete from last N minutes
+    
+    Features: Instant, bulk, filtering, range, auto-spam detection, media filtering
+    """
+    try:
+        # Permission check: ensure caller is admin
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(
+                message,
+                "❌ You need admin permissions to delete messages",
+                parse_mode=ParseMode.HTML,
+                delay=5
+            )
+            return
+        
+        args = message.text.split()
+        mode = args[1].lower() if len(args) > 1 else "single"
+        
+        # ========== MODE 1: Single Message Delete (Default) ==========
+        if mode == "single" or message.reply_to_message:
+            target_message_id = None
+            target_user_id = None
+            reason = "Deleted by admin"
+            archive = False
+            
+            if message.reply_to_message:
+                target_message_id = message.reply_to_message.message_id
+                target_user_id = message.reply_to_message.from_user.id if message.reply_to_message.from_user else None
+                
+                # Check for archive flag
+                if len(args) > 1 and "archive" in args:
+                    archive = True
+                
+                # Parse optional reason
+                for i, arg in enumerate(args[1:], 1):
+                    if arg != "archive":
+                        reason = " ".join(args[i:])[:100]
+                        break
+        
+        # ========== MODE 2: Bulk Delete (Last N messages) ==========
+        elif mode == "bulk":
+            if len(args) < 3:
+                await send_and_delete(
+                    message,
+                    "❌ Usage: /del bulk <count> (e.g., /del bulk 5)",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                count = int(args[2])
+                if count <= 0 or count > 100:
+                    await send_and_delete(
+                        message,
+                        "❌ Count must be between 1 and 100",
+                        parse_mode=ParseMode.HTML,
+                        delay=5
+                    )
+                    return
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid count. Usage: /del bulk <count>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command message
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Bulk delete messages
+            deleted_count = 0
+            try:
+                for msg_id in range(message.message_id - count, message.message_id):
+                    try:
+                        await bot.delete_message(message.chat.id, msg_id)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Bulk deleted {deleted_count} messages by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Bulk delete error: {e}")
+            
+            return
+        
+        # ========== MODE 3: Delete by User ==========
+        elif mode == "user":
+            if len(args) < 3:
+                await send_and_delete(
+                    message,
+                    "❌ Usage: /del user <user_id>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                target_user_id = int(args[2])
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid user ID",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Log to API for user message deletion
+            try:
+                await api_client.post(
+                    f"/groups/{message.chat.id}/messages/delete-user-messages",
+                    {
+                        "target_user_id": target_user_id,
+                        "admin_id": message.from_user.id,
+                        "reason": "User messages cleared"
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Could not delete user messages: {e}")
+            
+            return
+        
+        # ========== MODE 4: Clear Entire Thread ==========
+        elif mode == "clear":
+            if "--confirm" not in args:
+                await send_and_delete(
+                    message,
+                    "⚠️ WARNING: This will clear all recent messages!\nUse: /del clear --confirm",
+                    parse_mode=ParseMode.HTML,
+                    delay=8
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Clear recent messages (last 50)
+            cleared_count = 0
+            try:
+                for msg_id in range(max(1, message.message_id - 50), message.message_id):
+                    try:
+                        await bot.delete_message(message.chat.id, msg_id)
+                        cleared_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Cleared {cleared_count} messages by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Clear error: {e}")
+            
+            return
+        
+        # ========== ULTRA MODE 1: Filter by Keyword ==========
+        elif mode == "filter":
+            if len(args) < 3:
+                await send_and_delete(
+                    message,
+                    "❌ Usage: /del filter <keyword>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            keyword = args[2].lower()
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Filter and delete messages with keyword
+            deleted_count = 0
+            try:
+                for msg_id in range(max(1, message.message_id - 100), message.message_id):
+                    try:
+                        msg = await bot.get_message(message.chat.id, msg_id)
+                        if msg.text and keyword in msg.text.lower():
+                            await bot.delete_message(message.chat.id, msg_id)
+                            deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Filtered deleted {deleted_count} messages with '{keyword}' by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Filter delete error: {e}")
+            
+            return
+        
+        # ========== ULTRA MODE 2: Delete Message Range ==========
+        elif mode == "range":
+            if len(args) < 4:
+                await send_and_delete(
+                    message,
+                    "❌ Usage: /del range <start_id> <end_id>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                start_id = int(args[2])
+                end_id = int(args[3])
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid message IDs",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Delete range
+            deleted_count = 0
+            try:
+                for msg_id in range(min(start_id, end_id), max(start_id, end_id) + 1):
+                    try:
+                        await bot.delete_message(message.chat.id, msg_id)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Range deleted {deleted_count} messages ({start_id}-{end_id}) by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Range delete error: {e}")
+            
+            return
+        
+        # ========== ULTRA MODE 3: Auto-Spam Detection ==========
+        elif mode == "spam":
+            if "--auto" not in args:
+                await send_and_delete(
+                    message,
+                    "Usage: /del spam --auto",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Auto-detect and delete spam (repeated messages, links, etc.)
+            deleted_count = 0
+            spam_patterns = ["click here", "buy now", "free", "telegram.me", "t.me", "http", "://"]
+            
+            try:
+                for msg_id in range(max(1, message.message_id - 50), message.message_id):
+                    try:
+                        msg = await bot.get_message(message.chat.id, msg_id)
+                        if msg.text:
+                            text_lower = msg.text.lower()
+                            if any(pattern in text_lower for pattern in spam_patterns):
+                                await bot.delete_message(message.chat.id, msg_id)
+                                deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Auto-spam deleted {deleted_count} messages by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Auto-spam error: {e}")
+            
+            return
+        
+        # ========== ULTRA MODE 4: Delete All Links ==========
+        elif mode == "links":
+            if "--remove" not in args:
+                await send_and_delete(
+                    message,
+                    "Usage: /del links --remove",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Delete all messages with links
+            deleted_count = 0
+            try:
+                for msg_id in range(max(1, message.message_id - 100), message.message_id):
+                    try:
+                        msg = await bot.get_message(message.chat.id, msg_id)
+                        if msg.text and ("http" in msg.text or "telegram" in msg.text):
+                            await bot.delete_message(message.chat.id, msg_id)
+                            deleted_count += 1
+                        elif msg.entities:
+                            # Message has URL entities
+                            await bot.delete_message(message.chat.id, msg_id)
+                            deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Links deleted {deleted_count} messages by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Links delete error: {e}")
+            
+            return
+        
+        # ========== ULTRA MODE 5: Delete All Media ==========
+        elif mode == "media":
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Delete all media messages (photos, videos, documents, etc.)
+            deleted_count = 0
+            try:
+                for msg_id in range(max(1, message.message_id - 100), message.message_id):
+                    try:
+                        msg = await bot.get_message(message.chat.id, msg_id)
+                        if msg.photo or msg.video or msg.document or msg.audio or msg.voice:
+                            await bot.delete_message(message.chat.id, msg_id)
+                            deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Media deleted {deleted_count} messages by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Media delete error: {e}")
+            
+            return
+        
+        # ========== ULTRA MODE 6: Delete from Last N Minutes ==========
+        elif mode == "recent":
+            if len(args) < 3:
+                await send_and_delete(
+                    message,
+                    "❌ Usage: /del recent <minutes>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                minutes = int(args[2])
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid minutes value",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Delete messages from last N minutes
+            from datetime import datetime, timedelta
+            cutoff_time = datetime.now() - timedelta(minutes=minutes)
+            deleted_count = 0
+            
+            try:
+                for msg_id in range(max(1, message.message_id - 100), message.message_id):
+                    try:
+                        msg = await bot.get_message(message.chat.id, msg_id)
+                        if msg.date and msg.date > cutoff_time:
+                            await bot.delete_message(message.chat.id, msg_id)
+                            deleted_count += 1
+                    except Exception:
+                        pass
+                
+                logger.info(f"Recent deleted {deleted_count} messages from last {minutes} min by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Recent delete error: {e}")
+            
+            return
+        
+        # ========== MODE 5: Archive Before Delete ==========
+        elif mode == "archive":
+            if not message.reply_to_message:
+                await send_and_delete(
+                    message,
+                    "❌ Reply to a message to archive it",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            target_message_id = message.reply_to_message.message_id
+            target_user_id = message.reply_to_message.from_user.id if message.reply_to_message.from_user else None
+            
+            # Archive to database before deleting
+            try:
+                await api_client.post(
+                    f"/groups/{message.chat.id}/messages/archive",
+                    {
+                        "message_id": target_message_id,
+                        "admin_id": message.from_user.id,
+                        "message_content": message.reply_to_message.text or "[Media]"
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Could not archive message: {e}")
+        
+        # ========== DEFAULT: Single Delete ==========
+        if mode != "bulk" and mode != "user" and mode != "clear":
+            if not message.reply_to_message and mode == "single":
+                await send_and_delete(
+                    message,
+                    "❌ Reply to a message or use: /del bulk <count>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Delete target message
+            if "target_message_id" in locals() and target_message_id:
+                try:
+                    await bot.delete_message(message.chat.id, target_message_id)
+                    
+                    # Log to API
+                    try:
+                        await api_client.post(
+                            f"/groups/{message.chat.id}/messages/delete",
+                            {
+                                "message_id": target_message_id,
+                                "admin_id": message.from_user.id,
+                                "reason": locals().get("reason", "Deleted by admin"),
+                                "target_user_id": locals().get("target_user_id"),
+                                "archived": locals().get("archive", False)
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not log deletion: {e}")
+                    
+                    logger.info(f"Message deleted by {message.from_user.id}")
+                
+                except Exception as e:
+                    logger.error(f"Error deleting message: {e}")
+    
+    except Exception as e:
+        logger.error(f"Delete command failed: {e}")
+        await send_and_delete(
+            message,
+            f"❌ Error: {escape_error_message(str(e))}",
+            parse_mode=ParseMode.HTML,
+            delay=6
+        )
+
+
+# ==================== MESSAGE SENDING COMMAND (ADVANCED) ====================
+
+async def cmd_send(message: Message):
+    """
+    📨 ULTRA-ADVANCED Message Sending Command - Enterprise-grade features
+    
+    Basic Modes:
+    ⚡ /send <text>                    - Send to group
+    ⚡ /send (reply)                   - Send in thread
+    
+    Advanced Modes:
+    🔥 /send pin <text>                - Send & pin message
+    🔥 /send edit <msg_id> <text>      - Edit existing message
+    🔥 /send copy <msg_id>             - Copy & resend message
+    🔥 /send broadcast <text>          - Send to all groups
+    🔥 /send html <html_text>          - Send with HTML formatting
+    
+    Ultra Modes:
+    ⚡⚡ /send schedule <HH:MM> <text>  - Schedule message delivery
+    ⚡⚡ /send repeat <times> <text>    - Repeat message N times
+    ⚡⚡ /send notify <text>            - Send + notify all admins
+    ⚡⚡ /send silent <text>            - Send without notification
+    ⚡⚡ /send reactive <text> <reaction> - Send with reaction
+    
+    Features: Scheduling, repeating, notifications, silent mode, reactions
+    """
+    try:
+        # Permission check: ensure caller is admin
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(
+                message,
+                "❌ You need admin permissions to send messages via bot",
+                parse_mode=ParseMode.HTML,
+                delay=5
+            )
+            return
+        
+        args = message.text.split()
+        mode = args[1].lower() if len(args) > 1 else "send"
+        
+        # ========== MODE 1: Normal Send (Default) ==========
+        if mode == "send" or message.reply_to_message or len(args) < 2:
+            message_text = None
+            reply_to_id = None
+            
+            # Parse message text
+            if message.reply_to_message:
+                parts = message.text.split(maxsplit=1)
+                if len(parts) > 1:
+                    message_text = parts[1]
+                elif message.reply_to_message.text:
+                    message_text = message.reply_to_message.text
+                
+                reply_to_id = message.reply_to_message.message_id
+            else:
+                parts = message.text.split(maxsplit=1)
+                if len(parts) < 2:
+                    await send_and_delete(
+                        message,
+                        "Usage: /send <text> or /send (reply) or /send pin <text>",
+                        parse_mode=ParseMode.HTML,
+                        delay=5
+                    )
+                    return
+                message_text = parts[1]
+            
+            if not message_text or len(message_text.strip()) == 0:
+                await send_and_delete(
+                    message,
+                    "❌ Message text cannot be empty",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            if len(message_text) > 4096:
+                await send_and_delete(
+                    message,
+                    "❌ Message text cannot exceed 4096 characters",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send message
+            try:
+                if reply_to_id:
+                    await bot.send_message(
+                        message.chat.id,
+                        message_text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        reply_to_message_id=reply_to_id
+                    )
+                else:
+                    await bot.send_message(
+                        message.chat.id,
+                        message_text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                
+                # Log to API
+                try:
+                    await api_client.post(
+                        f"/groups/{message.chat.id}/messages/send",
+                        {
+                            "text": message_text,
+                            "admin_id": message.from_user.id,
+                            "reply_to_message_id": reply_to_id,
+                            "mode": "send",
+                            "sent": True
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not log message: {e}")
+            
+            except Exception as e:
+                logger.error(f"Error sending message: {e}")
+        
+        # ========== MODE 2: Send & Pin ==========
+        elif mode == "pin":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 3:
+                await send_and_delete(
+                    message,
+                    "Usage: /send pin <message_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            message_text = text_parts[2]
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send and pin
+            try:
+                sent_msg = await bot.send_message(
+                    message.chat.id,
+                    message_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                
+                # Pin the message
+                try:
+                    await bot.pin_chat_message(message.chat.id, sent_msg.message_id)
+                    logger.info(f"Message pinned by {message.from_user.id}")
+                except Exception as e:
+                    logger.warning(f"Could not pin message: {e}")
+                
+                # Log to API
+                try:
+                    await api_client.post(
+                        f"/groups/{message.chat.id}/messages/send",
+                        {
+                            "text": message_text,
+                            "admin_id": message.from_user.id,
+                            "mode": "pin",
+                            "pinned": True
+                        }
+                    )
+                except Exception:
+                    pass
+            
+            except Exception as e:
+                logger.error(f"Error pinning message: {e}")
+        
+        # ========== MODE 3: Edit Message ==========
+        elif mode == "edit":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 4:
+                await send_and_delete(
+                    message,
+                    "Usage: /send edit <message_id> <new_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                msg_id = int(text_parts[2])
+                new_text = text_parts[3] if len(text_parts) > 3 else " ".join(text_parts[3:])
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid message ID",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Edit message
+            try:
+                await bot.edit_message_text(
+                    new_text,
+                    message.chat.id,
+                    msg_id,
+                    parse_mode=ParseMode.HTML
+                )
+                
+                logger.info(f"Message {msg_id} edited by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Error editing message: {e}")
+        
+        # ========== MODE 4: Copy & Resend ==========
+        elif mode == "copy":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 3:
+                await send_and_delete(
+                    message,
+                    "Usage: /send copy <message_id>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                msg_id = int(text_parts[2])
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid message ID",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Copy and resend
+            try:
+                original = await bot.get_message(message.chat.id, msg_id)
+                await bot.copy_message(message.chat.id, message.chat.id, msg_id)
+                logger.info(f"Message {msg_id} copied by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Error copying message: {e}")
+        
+        # ========== MODE 5: Broadcast to All Groups ==========
+        elif mode == "broadcast":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 3:
+                await send_and_delete(
+                    message,
+                    "Usage: /send broadcast <message_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            broadcast_text = text_parts[2]
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Broadcast to all groups via API
+            try:
+                await api_client.post(
+                    f"/groups/{message.chat.id}/messages/broadcast-all",
+                    {
+                        "text": broadcast_text,
+                        "admin_id": message.from_user.id,
+                        "source_group": message.chat.id
+                    }
+                )
+                logger.info(f"Broadcast sent by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Broadcast error: {e}")
+        
+        # ========== MODE 6: HTML Formatted Send ==========
+        elif mode == "html":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 3:
+                await send_and_delete(
+                    message,
+                    "Usage: /send html <HTML_TEXT>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            html_text = text_parts[2]
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send with HTML
+            try:
+                await bot.send_message(
+                    message.chat.id,
+                    html_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                
+                logger.info(f"HTML message sent by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Error sending HTML message: {e}")
+        
+        # ========== ULTRA MODE 1: Schedule Message ==========
+        elif mode == "schedule":
+            text_parts = message.text.split(maxsplit=3)
+            if len(text_parts) < 4:
+                await send_and_delete(
+                    message,
+                    "Usage: /send schedule <HH:MM> <message_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            time_str = text_parts[2]
+            schedule_text = text_parts[3] if len(text_parts) > 3 else " ".join(text_parts[3:])
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Schedule message
+            try:
+                await api_client.post(
+                    f"/groups/{message.chat.id}/messages/schedule",
+                    {
+                        "text": schedule_text,
+                        "admin_id": message.from_user.id,
+                        "schedule_time": time_str,
+                        "group_id": message.chat.id
+                    }
+                )
+                logger.info(f"Message scheduled for {time_str} by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Schedule error: {e}")
+        
+        # ========== ULTRA MODE 2: Repeat Message ==========
+        elif mode == "repeat":
+            text_parts = message.text.split(maxsplit=3)
+            if len(text_parts) < 4:
+                await send_and_delete(
+                    message,
+                    "Usage: /send repeat <times> <message_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            try:
+                times = int(text_parts[2])
+                if times <= 0 or times > 10:
+                    await send_and_delete(
+                        message,
+                        "❌ Repeat count must be 1-10",
+                        parse_mode=ParseMode.HTML,
+                        delay=5
+                    )
+                    return
+            except ValueError:
+                await send_and_delete(
+                    message,
+                    "❌ Invalid repeat count",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            repeat_text = text_parts[3] if len(text_parts) > 3 else " ".join(text_parts[3:])
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send message multiple times
+            try:
+                for i in range(times):
+                    await bot.send_message(
+                        message.chat.id,
+                        repeat_text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                
+                logger.info(f"Message repeated {times} times by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Repeat error: {e}")
+        
+        # ========== ULTRA MODE 3: Notify Admins ==========
+        elif mode == "notify":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 3:
+                await send_and_delete(
+                    message,
+                    "Usage: /send notify <message_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            notify_text = text_parts[2]
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send message + notify admins
+            try:
+                await bot.send_message(
+                    message.chat.id,
+                    f"🔔 {notify_text}",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                
+                # Notify admins via API
+                await api_client.post(
+                    f"/groups/{message.chat.id}/messages/admin-notify",
+                    {
+                        "text": notify_text,
+                        "admin_id": message.from_user.id,
+                        "notification": True
+                    }
+                )
+                
+                logger.info(f"Notification sent by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Notify error: {e}")
+        
+        # ========== ULTRA MODE 4: Silent Send (No Notifications) ==========
+        elif mode == "silent":
+            text_parts = message.text.split(maxsplit=2)
+            if len(text_parts) < 3:
+                await send_and_delete(
+                    message,
+                    "Usage: /send silent <message_text>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            silent_text = text_parts[2]
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send silently (disable notification)
+            try:
+                await bot.send_message(
+                    message.chat.id,
+                    silent_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    disable_notification=True
+                )
+                
+                logger.info(f"Silent message sent by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Silent send error: {e}")
+        
+        # ========== ULTRA MODE 5: Send with Reaction ==========
+        elif mode == "reactive":
+            text_parts = message.text.split(maxsplit=3)
+            if len(text_parts) < 4:
+                await send_and_delete(
+                    message,
+                    "Usage: /send reactive <message_text> <emoji>",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+            
+            reactive_text = text_parts[2]
+            reaction_emoji = text_parts[3] if len(text_parts) > 3 else "👍"
+            
+            # Delete command
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            
+            # Send message with reaction
+            try:
+                sent_msg = await bot.send_message(
+                    message.chat.id,
+                    reactive_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                
+                # Add reaction
+                try:
+                    await bot.set_message_reaction(
+                        message.chat.id,
+                        sent_msg.message_id,
+                        reaction_emoji
+                    )
+                except Exception:
+                    pass
+                
+                logger.info(f"Message with reaction sent by {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Reactive send error: {e}")
+    
+    except Exception as e:
+        logger.error(f"Send command failed: {e}")
+        await send_and_delete(
+            message,
+            f"❌ Error: {escape_error_message(str(e))}",
+            parse_mode=ParseMode.HTML,
+            delay=6
+        )
 
 
 async def cmd_setrole(message: Message):
@@ -2035,20 +3590,940 @@ async def cmd_removerole(message: Message):
         await message.answer(f"❌ Error: {escape_error_message(str(e))}")
 
 
-async def handle_message(message: Message):
-    """Handle regular text messages"""
+# ============================================================================
+# WHITELIST/BLACKLIST MANAGEMENT COMMANDS
+# ============================================================================
+
+async def cmd_whitelist(message: Message):
+    """Handle /whitelist command - Manage whitelist
+    Usage:
+    /whitelist add @user [exemption|moderator] - Add user to whitelist
+    /whitelist add @user moderator [mute,unmute,warn,kick,send_link,...] - Add with specific powers
+    /whitelist remove @user - Remove from whitelist
+    /whitelist list - List all whitelisted users
+    /whitelist check @user - Check if user is whitelisted
+    """
     try:
-        logger.info(f"📨 Message from {message.from_user.username} ({message.from_user.id}): {message.text}")
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(message, "❌ You need admin permissions for this action",
+                                 parse_mode=ParseMode.HTML, delay=5)
+            return
         
-        # Echo the message back
+        args = message.text.split(maxsplit=3)
+        
+        if len(args) < 2:
+            help_text = (
+                "📋 <b>WHITELIST COMMANDS</b>\n\n"
+                "<b>Add exemption (bypass restrictions):</b>\n"
+                "/whitelist add @user exemption\n\n"
+                "<b>Add moderator (grant powers without admin):</b>\n"
+                "/whitelist add @user moderator\n"
+                "/whitelist add @user moderator mute,unmute,warn,kick\n\n"
+                "<b>Remove from whitelist:</b>\n"
+                "/whitelist remove @user\n\n"
+                "<b>View all whitelisted users:</b>\n"
+                "/whitelist list\n\n"
+                "<b>Check specific user:</b>\n"
+                "/whitelist check @user\n\n"
+                "<b>Available Powers for Moderators:</b>\n"
+                "mute, unmute, warn, kick, send_link, restrict, unrestrict, manage_stickers, manage_links"
+            )
+            await message.answer(help_text, parse_mode=ParseMode.HTML)
+            return
+        
+        action = args[1].lower()
+        
+        # ===== ADD TO WHITELIST =====
+        if action == "add":
+            if len(args) < 3:
+                await message.answer("Usage: /whitelist add <user_id|@username> [exemption|moderator] [powers]")
+                return
+            
+            user_id, username = parse_user_reference(args[2])
+            if not user_id:
+                await message.answer("❌ Could not identify user")
+                return
+            
+            entry_type = args[3].lower() if len(args) > 3 else "exemption"
+            
+            # Powers only apply if moderator
+            admin_powers = []
+            if entry_type == "moderator" and len(args) > 4:
+                admin_powers = [p.strip() for p in args[4].split(",")]
+            elif entry_type == "moderator":
+                # Default moderator powers
+                admin_powers = ["mute", "unmute", "warn", "kick", "restrict", "unrestrict"]
+            
+            # Add to whitelist via API
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/whitelist",
+                        json={
+                            "group_id": message.chat.id,
+                            "user_id": user_id,
+                            "username": username,
+                            "entry_type": entry_type,
+                            "admin_powers": admin_powers,
+                            "reason": f"Added by {message.from_user.first_name}",
+                            "added_by": message.from_user.id
+                        },
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code in [200, 201]:
+                        emoji = "🛡️" if entry_type == "exemption" else "⚡"
+                        powers_text = f"\n<b>Powers:</b> {', '.join(admin_powers)}" if admin_powers else ""
+                        await message.answer(
+                            f"{emoji} <b>Added to whitelist</b>\n\n"
+                            f"<b>User:</b> {username or user_id}\n"
+                            f"<b>Type:</b> {entry_type.upper()}{powers_text}",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "whitelist_add", success=True, args=message.text)
+                    else:
+                        error_msg = response.json().get("detail", "Unknown error")
+                        await message.answer(f"❌ Error: {error_msg}")
+                        
+            except Exception as e:
+                logger.error(f"Whitelist add failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        # ===== REMOVE FROM WHITELIST =====
+        elif action == "remove":
+            if len(args) < 3:
+                await message.answer("Usage: /whitelist remove <user_id|@username>")
+                return
+            
+            user_id, username = parse_user_reference(args[2])
+            if not user_id:
+                await message.answer("❌ Could not identify user")
+                return
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.delete(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/whitelist/{user_id}",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        await message.answer(
+                            f"✅ Removed from whitelist\n"
+                            f"<b>User:</b> {username or user_id}",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "whitelist_remove", success=True, args=message.text)
+                    else:
+                        await message.answer("❌ User not in whitelist")
+                        
+            except Exception as e:
+                logger.error(f"Whitelist remove failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        # ===== LIST WHITELIST =====
+        elif action == "list":
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/whitelist",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        whitelist = response.json()
+                        if not whitelist:
+                            await message.answer("📋 Whitelist is empty")
+                            return
+                        
+                        # Group by type
+                        exemptions = [w for w in whitelist if w.get("entry_type") == "exemption"]
+                        moderators = [w for w in whitelist if w.get("entry_type") == "moderator"]
+                        
+                        text = "📋 <b>WHITELIST</b>\n\n"
+                        
+                        if exemptions:
+                            text += "<b>🛡️ Exemptions (bypass restrictions):</b>\n"
+                            for w in exemptions[:10]:  # Limit to 10
+                                text += f"• {w.get('username') or w.get('user_id')}\n"
+                            if len(exemptions) > 10:
+                                text += f"... and {len(exemptions) - 10} more\n"
+                            text += "\n"
+                        
+                        if moderators:
+                            text += "<b>⚡ Moderators (non-admin powers):</b>\n"
+                            for w in moderators[:10]:  # Limit to 10
+                                powers = ", ".join(w.get("admin_powers", [])[:3])
+                                text += f"• {w.get('username') or w.get('user_id')} ({powers})\n"
+                            if len(moderators) > 10:
+                                text += f"... and {len(moderators) - 10} more\n"
+                        
+                        await message.answer(text, parse_mode=ParseMode.HTML)
+                    else:
+                        await message.answer("❌ Could not fetch whitelist")
+                        
+            except Exception as e:
+                logger.error(f"Whitelist list failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        # ===== CHECK USER =====
+        elif action == "check":
+            if len(args) < 3:
+                await message.answer("Usage: /whitelist check <user_id|@username>")
+                return
+            
+            user_id, username = parse_user_reference(args[2])
+            if not user_id:
+                await message.answer("❌ Could not identify user")
+                return
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/whitelist/{user_id}",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("whitelisted"):
+                            entry_type = data.get("entry_type")
+                            emoji = "🛡️" if entry_type == "exemption" else "⚡"
+                            powers = data.get("admin_powers", [])
+                            powers_text = f"\n<b>Powers:</b> {', '.join(powers)}" if powers else ""
+                            
+                            await message.answer(
+                                f"{emoji} <b>User is whitelisted</b>\n\n"
+                                f"<b>User:</b> {username or user_id}\n"
+                                f"<b>Type:</b> {entry_type.upper()}{powers_text}\n"
+                                f"<b>Added:</b> {data.get('added_at', 'Unknown')}",
+                                parse_mode=ParseMode.HTML
+                            )
+                        else:
+                            await message.answer(f"❌ User {username or user_id} is not whitelisted")
+                    else:
+                        await message.answer("❌ Could not check user status")
+                        
+            except Exception as e:
+                logger.error(f"Whitelist check failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        else:
+            await message.answer("❌ Unknown action. Use: add, remove, list, or check")
+            
+    except Exception as e:
+        logger.error(f"Whitelist command failed: {e}")
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+
+
+async def cmd_blacklist(message: Message):
+    """Handle /blacklist command - Manage blacklist
+    Usage:
+    /blacklist add sticker <sticker_id> - Block sticker
+    /blacklist add gif <gif_id> - Block GIF
+    /blacklist add user <user_id> - Block user
+    /blacklist add link <url> - Block specific link
+    /blacklist add domain <domain.com> - Block entire domain
+    /blacklist remove <id> - Remove from blacklist
+    /blacklist list [sticker|gif|user|link|domain] - List blacklist
+    /blacklist check <item> - Check if blacklisted
+    """
+    try:
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(message, "❌ You need admin permissions for this action",
+                                 parse_mode=ParseMode.HTML, delay=5)
+            return
+        
+        args = message.text.split(maxsplit=3)
+        
+        if len(args) < 2:
+            help_text = (
+                "🚫 <b>BLACKLIST COMMANDS</b>\n\n"
+                "<b>Block stickers:</b>\n"
+                "/blacklist add sticker <sticker_id>\n\n"
+                "<b>Block GIFs:</b>\n"
+                "/blacklist add gif <gif_id>\n\n"
+                "<b>Block users:</b>\n"
+                "/blacklist add user <user_id|@username>\n\n"
+                "<b>Block links:</b>\n"
+                "/blacklist add link <https://example.com>\n"
+                "/blacklist add domain <example.com>\n\n"
+                "<b>Remove from blacklist:</b>\n"
+                "/blacklist remove <blacklist_id>\n\n"
+                "<b>View all blacklisted items:</b>\n"
+                "/blacklist list [sticker|gif|user|link|domain]\n\n"
+                "<b>Check if item is blacklisted:</b>\n"
+                "/blacklist check sticker <sticker_id>\n"
+                "/blacklist check link <https://example.com>"
+            )
+            await message.answer(help_text, parse_mode=ParseMode.HTML)
+            return
+        
+        action = args[1].lower()
+        
+        # ===== ADD TO BLACKLIST =====
+        if action == "add":
+            if len(args) < 4:
+                await message.answer("Usage: /blacklist add <sticker|gif|user|link|domain> <value>")
+                return
+            
+            item_type = args[2].lower()
+            item_value = args[3]
+            
+            if item_type not in ["sticker", "gif", "user", "link", "domain"]:
+                await message.answer("❌ Invalid type. Use: sticker, gif, user, link, or domain")
+                return
+            
+            # Parse user reference if type is user
+            if item_type == "user":
+                user_id, username = parse_user_reference(item_value)
+                if not user_id:
+                    await message.answer("❌ Could not identify user")
+                    return
+                item_value = str(user_id)
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/blacklist",
+                        json={
+                            "group_id": message.chat.id,
+                            "entry_type": item_type,
+                            "blocked_item": item_value,
+                            "reason": f"Added by {message.from_user.first_name}",
+                            "added_by": message.from_user.id,
+                            "auto_delete": True
+                        },
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code in [200, 201]:
+                        await message.answer(
+                            f"🚫 <b>Added to blacklist</b>\n\n"
+                            f"<b>Type:</b> {item_type.upper()}\n"
+                            f"<b>Item:</b> <code>{item_value[:50]}</code>",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "blacklist_add", success=True, args=message.text)
+                    else:
+                        error_msg = response.json().get("detail", "Unknown error")
+                        await message.answer(f"❌ Error: {error_msg}")
+                        
+            except Exception as e:
+                logger.error(f"Blacklist add failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        # ===== LIST BLACKLIST =====
+        elif action == "list":
+            filter_type = args[2].lower() if len(args) > 2 else None
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    url = f"{api_client.base_url}/api/v2/groups/{message.chat.id}/blacklist"
+                    if filter_type:
+                        url += f"?entry_type={filter_type}"
+                    
+                    response = await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        blacklist = response.json()
+                        if not blacklist:
+                            await message.answer("🚫 Blacklist is empty")
+                            return
+                        
+                        text = "🚫 <b>BLACKLIST</b>\n\n"
+                        
+                        # Group by type
+                        by_type = {}
+                        for item in blacklist:
+                            t = item.get("entry_type")
+                            if t not in by_type:
+                                by_type[t] = []
+                            by_type[t].append(item)
+                        
+                        type_emojis = {"sticker": "🎨", "gif": "🎬", "user": "👤", "link": "🔗", "domain": "🌐"}
+                        
+                        for item_type in sorted(by_type.keys()):
+                            items = by_type[item_type][:5]  # Limit to 5 per type
+                            emoji = type_emojis.get(item_type, "•")
+                            text += f"<b>{emoji} {item_type.upper()}s ({len(by_type[item_type])} total):</b>\n"
+                            for item in items:
+                                display = item.get("blocked_item")[:30]
+                                text += f"• <code>{display}</code>\n"
+                            if len(by_type[item_type]) > 5:
+                                text += f"  ... and {len(by_type[item_type]) - 5} more\n"
+                            text += "\n"
+                        
+                        await message.answer(text, parse_mode=ParseMode.HTML)
+                    else:
+                        await message.answer("❌ Could not fetch blacklist")
+                        
+            except Exception as e:
+                logger.error(f"Blacklist list failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        # ===== CHECK BLACKLIST =====
+        elif action == "check":
+            if len(args) < 4:
+                await message.answer("Usage: /blacklist check <sticker|gif|link|domain> <value>")
+                return
+            
+            check_type = args[2].lower()
+            check_value = args[3]
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/blacklist/check/{check_type}/{check_value}",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("blacklisted"):
+                            await message.answer(
+                                f"🚫 <b>Item is blacklisted</b>\n\n"
+                                f"<b>Type:</b> {check_type.upper()}\n"
+                                f"<b>Item:</b> <code>{check_value[:50]}</code>\n"
+                                f"<b>Reason:</b> {data.get('reason', 'No reason')}",
+                                parse_mode=ParseMode.HTML
+                            )
+                        else:
+                            await message.answer(f"✅ Item is <b>NOT</b> blacklisted", parse_mode=ParseMode.HTML)
+                    else:
+                        await message.answer("❌ Could not check item")
+                        
+            except Exception as e:
+                logger.error(f"Blacklist check failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        # ===== REMOVE FROM BLACKLIST =====
+        elif action == "remove":
+            if len(args) < 3:
+                await message.answer("Usage: /blacklist remove <blacklist_id>")
+                return
+            
+            blacklist_id = args[2]
+            
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.delete(
+                        f"{api_client.base_url}/api/v2/groups/{message.chat.id}/blacklist/{blacklist_id}",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        await message.answer("✅ Removed from blacklist")
+                        await log_command_execution(message, "blacklist_remove", success=True, args=message.text)
+                    else:
+                        await message.answer("❌ Item not found in blacklist")
+                        
+            except Exception as e:
+                logger.error(f"Blacklist remove failed: {e}")
+                await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        
+        else:
+            await message.answer("❌ Unknown action. Use: add, remove, list, or check")
+            
+    except Exception as e:
+        logger.error(f"Blacklist command failed: {e}")
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+
+
+async def cmd_nightmode(message: Message):
+    """Handle /nightmode command - Configure and manage night mode scheduling
+    
+    Night mode automatically restricts content during scheduled hours.
+    When enabled, restricted content types are auto-deleted.
+    Users with exemptions or /free permissions bypass restrictions.
+    
+    Subcommands:
+    - /nightmode status          : Show current night mode settings
+    - /nightmode enable          : Enable night mode
+    - /nightmode disable         : Disable night mode
+    - /nightmode schedule START END : Set time window (e.g., /nightmode schedule 22:00 08:00)
+    - /nightmode restrict TYPES  : Set restricted content types (text,stickers,gifs,media,voice,links)
+    - /nightmode exempt USER_ID  : Add user exemption
+    - /nightmode unexempt USER_ID: Remove user exemption
+    - /nightmode list-exempt     : List all exempt users and roles
+    """
+    try:
+        # Permission check: only admins can manage night mode
+        if not await check_is_admin(message.from_user.id, message.chat.id):
+            await send_and_delete(message, "❌ You need admin permissions to manage night mode",
+                                 parse_mode=ParseMode.HTML, delay=5)
+            return
+        
+        args = message.text.split()
+        if len(args) < 2:
+            # Show help
+            help_text = (
+                f"╔═══════════════════════════════════════╗\n"
+                f"║ 🌙 <b>NIGHT MODE COMMAND HELP</b>    ║\n"
+                f"╚═══════════════════════════════════════╝\n\n"
+                f"<b>📌 Usage:</b>\n"
+                f"  <code>/nightmode status</code> - Show settings\n"
+                f"  <code>/nightmode enable</code> - Turn on\n"
+                f"  <code>/nightmode disable</code> - Turn off\n"
+                f"  <code>/nightmode schedule HH:MM HH:MM</code> - Set hours\n"
+                f"  <code>/nightmode restrict [types]</code> - Set restrictions\n"
+                f"  <code>/nightmode exempt USER_ID</code> - Add exemption\n"
+                f"  <code>/nightmode unexempt USER_ID</code> - Remove exemption\n"
+                f"  <code>/nightmode list-exempt</code> - Show exemptions\n\n"
+                f"<b>📝 Content Types:</b> text, stickers, gifs, media, voice, links\n"
+                f"<b>⏰ Time Format:</b> HH:MM (24-hour)\n"
+                f"\n<b>💡 Example:</b>\n"
+                f"  <code>/nightmode schedule 22:00 08:00</code>\n"
+                f"  <code>/nightmode restrict stickers,gifs,media</code>"
+            )
+            await message.answer(help_text, parse_mode=ParseMode.HTML)
+            return
+        
+        action = args[1].lower()
+        group_id = message.chat.id
+        
+        # ======== STATUS ========
+        if action == "status":
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/status",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        is_active = data.get("is_active", False)
+                        current_time = data.get("current_time", "N/A")
+                        start_time = data.get("start_time", "N/A")
+                        end_time = data.get("end_time", "N/A")
+                        next_transition = data.get("next_transition", "N/A")
+                        
+                        status_text = (
+                            f"╔═══════════════════════════════════════╗\n"
+                            f"║ 🌙 <b>NIGHT MODE STATUS</b>          ║\n"
+                            f"╚═══════════════════════════════════════╝\n\n"
+                            f"<b>Status:</b> {'🟢 ACTIVE' if is_active else '🔴 INACTIVE'}\n"
+                            f"<b>Current Time:</b> <code>{current_time}</code>\n"
+                            f"<b>Schedule:</b> <code>{start_time} - {end_time}</code>\n"
+                            f"<b>Next Change:</b> <code>{next_transition}</code>\n"
+                        )
+                        
+                        # Get full settings
+                        settings_resp = await client.get(
+                            f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/settings",
+                            headers={"Authorization": f"Bearer {api_client.api_key}"},
+                            timeout=10
+                        )
+                        
+                        if settings_resp.status_code == 200:
+                            settings = settings_resp.json()
+                            enabled = settings.get("enabled", False)
+                            restricted_types = settings.get("restricted_content_types", [])
+                            auto_delete = settings.get("auto_delete_restricted", False)
+                            
+                            status_text += (
+                                f"\n<b>⚙️ Settings:</b>\n"
+                                f"  <b>Enabled:</b> {'✅ YES' if enabled else '❌ NO'}\n"
+                                f"  <b>Auto-Delete:</b> {'✅ ON' if auto_delete else '❌ OFF'}\n"
+                                f"  <b>Restricted Types:</b>\n"
+                            )
+                            
+                            if restricted_types:
+                                for content_type in restricted_types:
+                                    status_text += f"    • <code>{content_type}</code>\n"
+                            else:
+                                status_text += "    <i>None (all allowed)</i>\n"
+                        
+                        await message.answer(status_text, parse_mode=ParseMode.HTML)
+                    else:
+                        await message.answer("❌ Could not fetch night mode status")
+                        
+            except Exception as e:
+                logger.error(f"Night mode status error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== ENABLE ========
+        elif action == "enable":
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/enable",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        await message.answer("✅ Night mode <b>ENABLED</b>", parse_mode=ParseMode.HTML)
+                        await log_command_execution(message, "nightmode_enable", success=True)
+                    else:
+                        await message.answer("❌ Failed to enable night mode")
+                        
+            except Exception as e:
+                logger.error(f"Night mode enable error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== DISABLE ========
+        elif action == "disable":
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/disable",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        await message.answer("✅ Night mode <b>DISABLED</b>", parse_mode=ParseMode.HTML)
+                        await log_command_execution(message, "nightmode_disable", success=True)
+                    else:
+                        await message.answer("❌ Failed to disable night mode")
+                        
+            except Exception as e:
+                logger.error(f"Night mode disable error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== SCHEDULE ========
+        elif action == "schedule":
+            if len(args) < 4:
+                await message.answer("Usage: /nightmode schedule HH:MM HH:MM\nExample: /nightmode schedule 22:00 08:00")
+                return
+            
+            try:
+                start_time = args[2]
+                end_time = args[3]
+                
+                # Validate time format (HH:MM)
+                for time_str in [start_time, end_time]:
+                    parts = time_str.split(":")
+                    if len(parts) != 2:
+                        raise ValueError(f"Invalid time format: {time_str}")
+                    hour = int(parts[0])
+                    minute = int(parts[1])
+                    if not (0 <= hour < 24) or not (0 <= minute < 60):
+                        raise ValueError(f"Invalid time: {time_str}")
+                
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.put(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/settings",
+                        json={"start_time": start_time, "end_time": end_time},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        await message.answer(
+                            f"✅ Night mode schedule updated:\n"
+                            f"<code>{start_time} - {end_time}</code>",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "nightmode_schedule", success=True, args=f"{start_time} {end_time}")
+                    else:
+                        await message.answer("❌ Failed to update schedule")
+                        
+            except ValueError as e:
+                await message.answer(f"❌ Error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Night mode schedule error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== RESTRICT ========
+        elif action == "restrict":
+            if len(args) < 3:
+                await message.answer(
+                    "Usage: /nightmode restrict TYPE1,TYPE2,...\n"
+                    "Types: text, stickers, gifs, media, voice, links"
+                )
+                return
+            
+            try:
+                content_types = [t.strip() for t in args[2].split(",")]
+                
+                # Validate content types
+                valid_types = ["text", "stickers", "gifs", "media", "voice", "links"]
+                for ct in content_types:
+                    if ct not in valid_types:
+                        raise ValueError(f"Invalid content type: {ct}")
+                
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.put(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/settings",
+                        json={"restricted_content_types": content_types},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        types_display = ", ".join([f"<code>{t}</code>" for t in content_types])
+                        await message.answer(
+                            f"✅ Restricted content types updated:\n{types_display}",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "nightmode_restrict", success=True, args=",".join(content_types))
+                    else:
+                        await message.answer("❌ Failed to update restrictions")
+                        
+            except ValueError as e:
+                await message.answer(f"❌ Error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Night mode restrict error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== EXEMPT ========
+        elif action == "exempt":
+            if len(args) < 3:
+                await message.answer("Usage: /nightmode exempt USER_ID")
+                return
+            
+            try:
+                exempt_user_id = int(args[2])
+                
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/add-exemption/{exempt_user_id}",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        await message.answer(
+                            f"✅ User <code>{exempt_user_id}</code> added to night mode exemptions",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "nightmode_exempt", success=True, args=str(exempt_user_id))
+                    else:
+                        await message.answer("❌ Failed to add exemption")
+                        
+            except ValueError:
+                await message.answer("❌ Invalid user ID")
+            except Exception as e:
+                logger.error(f"Night mode exempt error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== UNEXEMPT ========
+        elif action == "unexempt":
+            if len(args) < 3:
+                await message.answer("Usage: /nightmode unexempt USER_ID")
+                return
+            
+            try:
+                exempt_user_id = int(args[2])
+                
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.delete(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/remove-exemption/{exempt_user_id}",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        await message.answer(
+                            f"✅ User <code>{exempt_user_id}</code> removed from night mode exemptions",
+                            parse_mode=ParseMode.HTML
+                        )
+                        await log_command_execution(message, "nightmode_unexempt", success=True, args=str(exempt_user_id))
+                    else:
+                        await message.answer("❌ Failed to remove exemption")
+                        
+            except ValueError:
+                await message.answer("❌ Invalid user ID")
+            except Exception as e:
+                logger.error(f"Night mode unexempt error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        # ======== LIST-EXEMPT ========
+        elif action == "list-exempt":
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/list-exemptions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=10
+                    )
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        exempt_users = data.get("exempt_user_ids", [])
+                        exempt_roles = data.get("exempt_roles", [])
+                        
+                        text = (
+                            f"╔═══════════════════════════════════════╗\n"
+                            f"║ ⭐ <b>NIGHT MODE EXEMPTIONS</b>       ║\n"
+                            f"╚═══════════════════════════════════════╝\n\n"
+                        )
+                        
+                        if exempt_users:
+                            text += "<b>👤 Exempt Users:</b>\n"
+                            for user_id in exempt_users:
+                                text += f"  • <code>{user_id}</code>\n"
+                        else:
+                            text += "<b>👤 Exempt Users:</b> <i>None</i>\n"
+                        
+                        text += "\n"
+                        
+                        if exempt_roles:
+                            text += "<b>🎖️ Exempt Roles:</b>\n"
+                            for role in exempt_roles:
+                                text += f"  • <code>{role}</code>\n"
+                        else:
+                            text += "<b>🎖️ Exempt Roles:</b> <i>None</i>\n"
+                        
+                        await message.answer(text, parse_mode=ParseMode.HTML)
+                    else:
+                        await message.answer("❌ Could not fetch exemptions")
+                        
+            except Exception as e:
+                logger.error(f"Night mode list-exempt error: {e}")
+                await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                                     parse_mode=ParseMode.HTML, delay=5)
+        
+        else:
+            await message.answer(f"❌ Unknown action: {action}\nUse: status, enable, disable, schedule, restrict, exempt, unexempt, or list-exempt")
+            
+    except Exception as e:
+        logger.error(f"Night mode command failed: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+async def handle_message(message: Message):
+    """Handle regular text messages with restriction checking and auto-delete
+    
+    Checks:
+    1. User permissions (blacklist/restriction)
+    2. Night mode restrictions (auto-delete if active and user not exempt)
+    3. Message type restrictions during night mode
+    """
+    try:
+        user_id = message.from_user.id
+        group_id = message.chat.id
+        
+        logger.info(f"📨 Message from {message.from_user.username} ({user_id})")
+        
+        # ============ NIGHT MODE CHECK ============
+        # Determine message content type
+        content_type = "text"
+        if message.sticker:
+            content_type = "stickers"
+        elif message.animation or message.video_note:
+            content_type = "gifs"
+        elif message.photo or message.video or message.document:
+            content_type = "media"
+        elif message.voice or message.audio:
+            content_type = "voice"
+        elif message.text and ("http://" in message.text or "https://" in message.text):
+            content_type = "links"
+        
+        # Check night mode permission for this content type
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                nm_resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/check/{user_id}/{content_type}",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                
+                if nm_resp.status_code == 200:
+                    nm_check = nm_resp.json()
+                    can_send = nm_check.get("can_send", True)
+                    
+                    if not can_send:
+                        # Night mode is active and user cannot send this content type
+                        reason = nm_check.get("reason", "Night mode restriction active")
+                        logger.warning(f"🌙 User {user_id} blocked by night mode: {reason}")
+                        
+                        try:
+                            await message.delete()
+                            logger.info(f"✅ Night mode: Auto-deleted {content_type} message from {user_id}")
+                        except Exception as e:
+                            logger.warning(f"Could not delete night mode message: {e}")
+                        
+                        return
+        except Exception as e:
+            logger.debug(f"Night mode check failed (continuing): {e}")
+        
+        # ============ REGULAR RESTRICTION CHECK ============
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Check text message restriction
+                if message.text:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/is-restricted",
+                        params={"permission_type": "text"},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if result.get("data", {}).get("is_restricted"):
+                            logger.warning(f"⛔ User {user_id} restricted from TEXT. Auto-deleting message.")
+                            await message.delete()
+                            return
+                
+                # Check sticker/GIF restriction
+                if message.sticker or message.animation or message.video_note:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/is-restricted",
+                        params={"permission_type": "stickers"},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if result.get("data", {}).get("is_restricted"):
+                            logger.warning(f"⛔ User {user_id} restricted from STICKERS/GIFs. Auto-deleting message.")
+                            await message.delete()
+                            return
+                
+                # Check voice message restriction
+                if message.voice or message.audio:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/is-restricted",
+                        params={"permission_type": "voice"},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if result.get("data", {}).get("is_restricted"):
+                            logger.warning(f"⛔ User {user_id} restricted from VOICE. Auto-deleting message.")
+                            await message.delete()
+                            return
+        except Exception as e:
+            logger.warning(f"Could not check restrictions: {e}")
+            # Continue anyway if check fails
+        
+        # Message is allowed - echo it back
         await message.answer(
             f"🤖 Message received!\n\n"
-            f"You said: {message.text}\n\n"
+            f"You said: {message.text or '[Media message]'}\n\n"
             f"Type /help to see available commands."
         )
     except Exception as e:
         logger.error(f"Message handler failed: {e}")
-        await message.answer(f"❌ Error processing message: {str(e)}")
+        try:
+            await message.answer(f"❌ Error processing message: {str(e)}")
+        except:
+            pass
 
 
 # ============================================================================
@@ -2139,6 +4614,265 @@ async def handle_edit_template_callback(callback_query: CallbackQuery, data: str
     except Exception as e:
         logger.error(f"Edit template callback error: {e}")
         await callback_query.answer(f"Error: {str(e)}", show_alert=True)
+
+
+async def handle_permission_toggle_callback(callback_query: CallbackQuery, data: str):
+    """Handle unified permission toggle callbacks (toggle_perm_*_user_id_group_id)
+    Automatically determines whether to lock or unlock based on current state
+    """
+    try:
+        # Parse callback data: toggle_perm_{type}_{user_id}_{group_id}
+        parts = data.split("_")
+        if len(parts) < 4:
+            await callback_query.answer("Invalid callback data", show_alert=True)
+            return
+        
+        perm_type = parts[2]  # text, stickers, gifs, voice, all
+        try:
+            user_id = int(parts[3])
+            group_id = int(parts[4])
+        except (ValueError, IndexError):
+            await callback_query.answer("Invalid user or group ID", show_alert=True)
+            return
+        
+        # Check admin permission
+        if not await check_is_admin(callback_query.from_user.id, group_id):
+            await callback_query.answer("❌ You need admin permissions", show_alert=True)
+            return
+        
+        # Fetch current permission state to determine action
+        is_currently_locked = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    perms = resp.json().get("data", {})
+                    perm_mapping = {
+                        "text": "can_send_messages",
+                        "stickers": "can_send_other_messages",
+                        "gifs": "can_send_other_messages",
+                        "voice": "can_send_audios"
+                    }
+                    
+                    if perm_type == "all":
+                        # Check if ANY permission is unlocked (not all locked)
+                        is_currently_locked = not (
+                            perms.get("can_send_messages", True) or
+                            perms.get("can_send_other_messages", True) or
+                            perms.get("can_send_audios", True)
+                        )
+                    else:
+                        api_perm = perm_mapping.get(perm_type)
+                        is_currently_locked = not perms.get(api_perm, True)
+        except Exception as e:
+            logger.warning(f"Could not fetch permissions: {e}")
+            is_currently_locked = False
+        
+        # Determine action: if locked, unlock (unrestrict); if unlocked, lock (restrict)
+        action_type = "unrestrict" if is_currently_locked else "restrict"
+        
+        # Map permission type to API parameter
+        perm_mapping = {
+            "text": "send_messages",
+            "stickers": "send_other_messages",
+            "gifs": "send_other_messages",
+            "voice": "send_audios"
+        }
+        
+        # Execute toggle via API
+        if perm_type == "all":
+            action_data = {
+                "action_type": action_type,
+                "group_id": group_id,
+                "user_id": user_id,
+                "toggle_all": True,
+                "initiated_by": callback_query.from_user.id
+            }
+        else:
+            api_perm = perm_mapping.get(perm_type)
+            if not api_perm:
+                await callback_query.answer(f"Unknown permission type: {perm_type}", show_alert=True)
+                return
+            
+            action_data = {
+                "action_type": action_type,
+                "group_id": group_id,
+                "user_id": user_id,
+                "metadata": {"permission_type": api_perm},
+                "initiated_by": callback_query.from_user.id
+            }
+        
+        result = await api_client.execute_action(action_data)
+        
+        if result.get("error"):
+            error_msg = escape_error_message(result.get("error"))
+            await callback_query.answer(f"❌ Error: {error_msg}", show_alert=True)
+        else:
+            # Show success message
+            if perm_type == "all":
+                success_msg = f"✅ All permissions {'locked' if action_type == 'restrict' else 'unlocked'}"
+            else:
+                perm_name = perm_type.capitalize()
+                action_word = "locked" if action_type == "restrict" else "unlocked"
+                success_msg = f"✅ {perm_name} {action_word}"
+            
+            await callback_query.answer(success_msg, show_alert=False)
+            
+            # Log the action
+            await log_command_execution(
+                callback_query.message,
+                action_type,
+                success=True,
+                result=f"Toggled {perm_type} ({action_type})",
+                args=f"User {user_id}"
+            )
+    
+    except Exception as e:
+        logger.error(f"Permission toggle callback error: {e}")
+        await callback_query.answer(f"❌ Error: {escape_error_message(str(e))}", show_alert=True)
+
+
+async def handle_toggle_cancel_callback(callback_query: CallbackQuery, data: str):
+    """Handle toggle cancel callbacks (toggle_cancel_user_id_group_id)"""
+    try:
+        await callback_query.message.delete()
+        await callback_query.answer("❌ Cancelled")
+    except Exception as e:
+        logger.error(f"Toggle cancel callback error: {e}")
+        await callback_query.answer("Error cancelling", show_alert=True)
+
+
+# ==================== ADVANCED ADMIN PANEL CALLBACKS ====================
+
+async def handle_advanced_toggle(callback_query: CallbackQuery):
+    """Handle advanced admin panel toggle buttons."""
+    try:
+        await callback_query.answer()  # Remove loading state
+        
+        data = callback_query.data
+        parts = data.split("_")
+        
+        if len(parts) < 4:
+            await callback_query.answer("Invalid callback data", show_alert=True)
+            return
+        
+        action = parts[2]  # mute, ban, warn, restrict, lockdown, nightmode, promote, demote
+        user_id = int(parts[3])
+        group_id = int(parts[4])
+        
+        # Check if user is admin
+        member = await bot.get_chat_member(group_id, callback_query.from_user.id)
+        if not member.can_restrict_members and not member.is_chat_admin():
+            await callback_query.answer("You don't have permission", show_alert=True)
+            return
+        
+        from bot.advanced_admin_panel import toggle_action_state, format_admin_panel_message, build_advanced_toggle_keyboard
+        
+        # Execute the toggle
+        result = await toggle_action_state(group_id, user_id, action, callback_query.from_user.id)
+        
+        if result.get("success"):
+            # Get updated panel info
+            user_data = await get_user_data(user_id)
+            first_name = user_data.get("first_name", "Unknown") if user_data else "Unknown"
+            username = user_data.get("username") if user_data else None
+            
+            # Format beautiful response
+            message = await format_admin_panel_message(
+                {"first_name": first_name, "username": username},
+                user_id,
+                group_id,
+                callback_query.from_user.id
+            )
+            
+            # Build keyboard
+            keyboard = await build_advanced_toggle_keyboard(user_id, group_id)
+            
+            # Get reply message ID if command was a reply
+            reply_message_id = None
+            if callback_query.message.reply_to_message:
+                reply_message_id = callback_query.message.reply_to_message.message_id
+            
+            try:
+                await callback_query.message.edit_text(
+                    message,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Edit message error: {e}")
+                await callback_query.answer("Error updating panel", show_alert=True)
+        else:
+            error_msg = result.get("message", "Failed to toggle action")
+            await callback_query.answer(error_msg, show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Advanced toggle callback error: {e}")
+        await callback_query.answer("Error processing toggle", show_alert=True)
+
+
+async def handle_advanced_refresh(callback_query: CallbackQuery):
+    """Refresh the advanced admin panel."""
+    try:
+        await callback_query.answer()
+        
+        data = callback_query.data
+        parts = data.split("_")
+        
+        if len(parts) < 3:
+            await callback_query.answer("Invalid callback data", show_alert=True)
+            return
+        
+        user_id = int(parts[2])
+        group_id = int(parts[3])
+        
+        from bot.advanced_admin_panel import format_admin_panel_message, build_advanced_toggle_keyboard
+        
+        # Get fresh user data
+        user_data = await get_user_data(user_id)
+        first_name = user_data.get("first_name", "Unknown") if user_data else "Unknown"
+        username = user_data.get("username") if user_data else None
+        
+        # Format message
+        message = await format_admin_panel_message(
+            {"first_name": first_name, "username": username},
+            user_id,
+            group_id,
+            callback_query.from_user.id
+        )
+        
+        # Build keyboard
+        keyboard = await build_advanced_toggle_keyboard(user_id, group_id)
+        
+        try:
+            await callback_query.message.edit_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await callback_query.answer("✅ Panel refreshed")
+        except Exception as e:
+            logger.error(f"Refresh edit error: {e}")
+            await callback_query.answer("Error refreshing panel", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Advanced refresh callback error: {e}")
+        await callback_query.answer("Error refreshing", show_alert=True)
+
+
+async def handle_advanced_close(callback_query: CallbackQuery):
+    """Close the advanced admin panel."""
+    try:
+        await callback_query.answer()
+        await callback_query.message.delete()
+        await callback_query.answer("✅ Panel closed")
+    except Exception as e:
+        logger.error(f"Advanced close callback error: {e}")
+        await callback_query.answer("Error closing panel", show_alert=True)
 
 
 async def handle_callback(callback_query: CallbackQuery):
@@ -2449,6 +5183,23 @@ async def handle_callback(callback_query: CallbackQuery):
             await callback_query.message.delete()
             await callback_query.answer("Settings closed")
             return
+        
+        # Handle permission toggle callbacks
+        if data.startswith("toggle_perm_"):
+            return await handle_permission_toggle_callback(callback_query, data)
+        
+        if data.startswith("toggle_cancel_"):
+            return await handle_toggle_cancel_callback(callback_query, data)
+        
+        # Handle advanced admin panel callbacks
+        if data.startswith("adv_toggle_"):
+            return await handle_advanced_toggle(callback_query)
+        
+        if data.startswith("adv_refresh_"):
+            return await handle_advanced_refresh(callback_query)
+        
+        if data.startswith("adv_close"):
+            return await handle_advanced_close(callback_query)
         
         # Try to decode compressed callback data first
         decoded = decode_callback_data(data)
@@ -2873,12 +5624,19 @@ async def setup_bot():
         dispatcher.message.register(cmd_promote, Command("promote"))
         dispatcher.message.register(cmd_demote, Command("demote"))
         dispatcher.message.register(cmd_lockdown, Command("lockdown"))
+        dispatcher.message.register(cmd_unlock, Command("unlock"))
         dispatcher.message.register(cmd_warn, Command("warn"))
         dispatcher.message.register(cmd_restrict, Command("restrict"))
         dispatcher.message.register(cmd_unrestrict, Command("unrestrict"))
+        dispatcher.message.register(cmd_free, Command("free"))
         dispatcher.message.register(cmd_purge, Command("purge"))
+        dispatcher.message.register(cmd_del, Command("del"))
+        dispatcher.message.register(cmd_send, Command("send"))
         dispatcher.message.register(cmd_setrole, Command("setrole"))
         dispatcher.message.register(cmd_removerole, Command("removerole"))
+        dispatcher.message.register(cmd_whitelist, Command("whitelist"))
+        dispatcher.message.register(cmd_blacklist, Command("blacklist"))
+        dispatcher.message.register(cmd_nightmode, Command("nightmode"))
         dispatcher.message.register(cmd_settings, Command("settings"))
 
         # Register callback query handler for inline buttons
@@ -2924,13 +5682,20 @@ async def setup_bot():
                 BotCommand(command="promote", description="Promote to admin (admin)"),
                 BotCommand(command="demote", description="Demote admin (admin)"),
                 BotCommand(command="lockdown", description="Lock group (admin)"),
+                BotCommand(command="unlock", description="Unlock group (admin)"),
                 BotCommand(command="settings", description="Group settings (admin)"),
                 BotCommand(command="warn", description="Warn user (admin)"),
                 BotCommand(command="restrict", description="Restrict user (admin)"),
                 BotCommand(command="unrestrict", description="Unrestrict user (admin)"),
+                BotCommand(command="free", description="Free user (alias for unrestrict) (admin)"),
                 BotCommand(command="purge", description="Delete user messages (admin)"),
+                BotCommand(command="del", description="Delete a message (admin)"),
+                BotCommand(command="send", description="Send message via bot (admin)"),
                 BotCommand(command="setrole", description="Set user role (admin)"),
                 BotCommand(command="removerole", description="Remove user role (admin)"),
+                BotCommand(command="whitelist", description="Manage whitelist (exemptions & moderators) (admin)"),
+                BotCommand(command="blacklist", description="Manage blacklist (stickers, GIFs, users, links) (admin)"),
+                BotCommand(command="nightmode", description="Configure night mode scheduling (admin)"),
             ])
             logger.info("✅ Bot commands registered")
         except Exception as e:
