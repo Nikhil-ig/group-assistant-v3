@@ -107,9 +107,9 @@ services:
   # ============================================
   # Centralized API Service
   # ============================================
-  centralized-api:
+  api-v2:
     build:
-      context: ./centralized_api
+      context: ./api_v2
       dockerfile: Dockerfile
     container_name: telegram-bot-api
     restart: unless-stopped
@@ -123,7 +123,7 @@ services:
     
     # Ports (only expose to localhost in production, use reverse proxy)
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8002:8002"
     
     # Environment variables
     environment:
@@ -142,7 +142,7 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8002/api/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -178,7 +178,7 @@ services:
     
     # Depends on API being healthy
     depends_on:
-      centralized-api:
+      api-v2:
         condition: service_healthy
     
     # No ports needed for bot (polling)
@@ -189,7 +189,7 @@ services:
     # Environment variables
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      CENTRALIZED_API_URL: ${CENTRALIZED_API_URL}
+      API_V2_URL: ${API_V2_URL}
       LOG_LEVEL: ${LOG_LEVEL}
       PYTHONUNBUFFERED: 1
       BOT_POLLING_TIMEOUT: ${BOT_POLLING_TIMEOUT}
@@ -230,7 +230,7 @@ services:
     
     # Depends on API being healthy
     depends_on:
-      centralized-api:
+      api-v2:
         condition: service_healthy
     
     # Ports (only expose to localhost, use reverse proxy)
@@ -240,7 +240,7 @@ services:
     # Environment variables
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      CENTRALIZED_API_URL: ${CENTRALIZED_API_URL}
+      API_V2_URL: ${API_V2_URL}
       SECRET_KEY: ${SECRET_KEY}
       ENVIRONMENT: ${ENVIRONMENT}
       DEBUG: ${DEBUG}
@@ -294,7 +294,7 @@ services:
   #     - "127.0.0.1:3000:80"
   #   
   #   environment:
-  #     REACT_APP_API_URL: ${CENTRALIZED_API_URL}
+  #     REACT_APP_API_URL: ${API_V2_URL}
   #   
   #   deploy:
   #     resources:

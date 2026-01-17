@@ -27,7 +27,7 @@ cd group-assistant-v3
 
 # Verify structure
 ls -la
-# Should show: docker-compose.yml, deploy-vps.sh, bot/, centralized_api/, web/, etc.
+# Should show: docker-compose.yml, deploy-vps.sh, bot/, api_v2/, web/, etc.
 ```
 
 ### 1.2 Create .env files on VPS (NEVER commit these)
@@ -38,13 +38,13 @@ These files contain secrets and should only exist on VPS.
 # Create bot/.env
 cat > bot/.env <<'EOF'
 TELEGRAM_BOT_TOKEN=your_actual_token_from_botfather
-CENTRALIZED_API_URL=http://centralized_api:8000
-CENTRALIZED_API_KEY=your_shared_api_key_here
+API_V2_URL=http://api_v2:8002
+API_V2_KEY=your_shared_api_key_here
 LOG_LEVEL=INFO
 EOF
 
-# Create centralized_api/.env
-cat > centralized_api/.env <<'EOF'
+# Create api_v2/.env
+cat > api_v2/.env <<'EOF'
 MONGODB_URL=mongodb://root:your_secure_password@mongo:27017/telegram_bot?authSource=admin
 REDIS_URL=redis://:your_secure_redis_password@redis:6379/0
 API_KEY=your_shared_api_key_here
@@ -55,13 +55,13 @@ LOG_LEVEL=INFO
 EOF
 
 # Secure the files (only root can read)
-chmod 600 bot/.env centralized_api/.env
+chmod 600 bot/.env api_v2/.env
 
 # Verify they're gitignored
 cat .gitignore | grep "\.env"
 # If not present, add them:
 echo "bot/.env" >> .gitignore
-echo "centralized_api/.env" >> .gitignore
+echo "api_v2/.env" >> .gitignore
 git add .gitignore
 git commit -m "chore: ensure .env files are ignored"
 git push origin main
@@ -295,7 +295,7 @@ docker compose ps
 
 ```bash
 # Check .env files exist
-ls -la bot/.env centralized_api/.env
+ls -la bot/.env api_v2/.env
 
 # Rebuild from scratch
 cd /opt/group-assistant-v3
@@ -344,7 +344,7 @@ docker compose logs -f
 
 # Specific service
 docker compose logs -f bot
-docker compose logs -f centralized_api
+docker compose logs -f api_v2
 
 # Deployment log
 tail -f /var/log/group-assistant-deploy.log
@@ -359,7 +359,7 @@ docker compose ps
 # NAME                  STATUS
 # mongo                 Up X minutes
 # redis                 Up X minutes
-# centralized_api       Up X minutes
+# api_v2       Up X minutes
 # bot                   Up X minutes
 # web                   Up X minutes (optional)
 ```
@@ -396,7 +396,7 @@ docker compose up -d
 
 3. **Restrict file permissions**
    ```bash
-   chmod 600 bot/.env centralized_api/.env
+   chmod 600 bot/.env api_v2/.env
    ```
 
 4. **Use SSH for git (not HTTPS)**
@@ -424,7 +424,7 @@ docker compose up -d
 
 - [ ] VPS has Docker & Docker Compose
 - [ ] Repository cloned to `/opt/group-assistant-v3`
-- [ ] `bot/.env` and `centralized_api/.env` created with actual tokens
+- [ ] `bot/.env` and `api_v2/.env` created with actual tokens
 - [ ] `.env` files have `chmod 600` permissions
 - [ ] `deploy-vps.sh` is executable
 - [ ] Manual deployment works: `./deploy-vps.sh`
@@ -437,6 +437,6 @@ docker compose up -d
 ## Support
 
 - **Bot logs**: `docker compose logs -f bot`
-- **API logs**: `docker compose logs -f centralized_api`
+- **API logs**: `docker compose logs -f api_v2`
 - **Deployment logs**: `tail -f /var/log/group-assistant-deploy.log`
 - **Webhook logs**: `sudo journalctl -u webhook -f`

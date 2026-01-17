@@ -20,7 +20,7 @@ mongod --port 27018 --dbpath /tmp/mongo_data
 ### Terminal 2: Start Centralized API
 ```bash
 cd "/Users/apple/Documents/Personal/startup/bots/telegram bot/python/main_bot_v2/v3"
-/Users/apple/.pyenv/versions/3.10.11/bin/python -m uvicorn centralized_api.app:app --reload --port 8000
+/Users/apple/.pyenv/versions/3.10.11/bin/python -m uvicorn api_v2.app:app --reload --port 8000
 ```
 
 ### Terminal 3: Start Web Service
@@ -49,8 +49,8 @@ tail -f /tmp/mongod.log
 
 ### Check Centralized API is Healthy
 ```bash
-curl http://localhost:8000/api/health
-# Expected: {"status":"healthy","service":"centralized_api","version":"1.0.0","database":"connected"}
+curl http://localhost:8002/api/health
+# Expected: {"status":"healthy","service":"api_v2","version":"1.0.0","database":"connected"}
 ```
 
 ### Check Web Service is Running
@@ -71,9 +71,9 @@ tail -f /tmp/bot.log
 
 | Service | URL | Documentation |
 |---------|-----|----------------|
-| Centralized API | http://localhost:8000 | http://localhost:8000/docs |
+| Centralized API | http://localhost:8002 | http://localhost:8002/docs |
 | Web Service | http://localhost:8002 | http://localhost:8002/docs |
-| Health Check | http://localhost:8000/api/health | - |
+| Health Check | http://localhost:8002/api/health | - |
 
 ---
 
@@ -94,7 +94,7 @@ pkill -f "python bot/main.py"
 pkill -f "uvicorn web.app"
 
 # Stop Centralized API
-pkill -f "uvicorn centralized_api.app"
+pkill -f "uvicorn api_v2.app"
 
 # Stop MongoDB
 pkill mongod
@@ -108,7 +108,7 @@ pkill mongod
 
 ```bash
 # Find what's using the port
-lsof -i :8000    # Centralized API
+lsof -i :8002    # Centralized API
 lsof -i :8002    # Web Service
 lsof -i :27018   # MongoDB
 
@@ -139,9 +139,9 @@ ps aux | grep mongod
 tail -f /tmp/mongod.log
 
 # Restart API
-pkill -f "uvicorn centralized_api"
+pkill -f "uvicorn api_v2"
 cd "/Users/apple/Documents/Personal/startup/bots/telegram bot/python/main_bot_v2/v3"
-/Users/apple/.pyenv/versions/3.10.11/bin/python -m uvicorn centralized_api.app:app --reload --port 8000
+/Users/apple/.pyenv/versions/3.10.11/bin/python -m uvicorn api_v2.app:app --reload --port 8000
 ```
 
 ### Bot not responding to commands
@@ -221,8 +221,8 @@ tail -f /tmp/bot.log
 export TELEGRAM_BOT_TOKEN="8366781443:AAHIXgGD1UXvPWw9EIDBlMk5Ktuhj2qQ8WU"
 
 # API Configuration
-export CENTRALIZED_API_URL="http://localhost:8000"
-export CENTRALIZED_API_KEY="shared-api-key"
+export API_V2_URL="http://localhost:8002"
+export API_V2_KEY="shared-api-key"
 
 # Database
 export MONGODB_HOST="localhost"
@@ -238,7 +238,7 @@ export LOG_LEVEL="INFO"
 ## Troubleshooting Checklist
 
 - [ ] MongoDB is running on port 27018
-- [ ] Centralized API is responding at http://localhost:8000/api/health
+- [ ] Centralized API is responding at http://localhost:8002/api/health
 - [ ] Web Service is running at http://localhost:8002
 - [ ] Bot has TELEGRAM_BOT_TOKEN set
 - [ ] Bot logs show "Bot is polling for updates"
@@ -255,7 +255,7 @@ cd "/Users/apple/Documents/Personal/startup/bots/telegram bot/python/main_bot_v2
 ./start_all_services.sh
 
 # Check status
-curl http://localhost:8000/api/health
+curl http://localhost:8002/api/health
 curl http://localhost:8002
 
 # View all logs

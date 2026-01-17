@@ -130,15 +130,15 @@ echo -e "${YELLOW}[4/6] Creating .env files...${NC}"
 # Create bot/.env
 cat > bot/.env <<EOF
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
-CENTRALIZED_API_URL=http://centralized_api:8000
-CENTRALIZED_API_KEY=$API_KEY
+API_V2_URL=http://api_v2:8002
+API_V2_KEY=$API_KEY
 LOG_LEVEL=INFO
 EOF
 
 chmod 600 bot/.env
 
-# Create centralized_api/.env
-cat > centralized_api/.env <<EOF
+# Create api_v2/.env
+cat > api_v2/.env <<EOF
 MONGODB_URL=mongodb://root:$MONGO_PASSWORD@mongo:27017/telegram_bot?authSource=admin
 MONGO_ROOT_USERNAME=root
 MONGO_ROOT_PASSWORD=$MONGO_PASSWORD
@@ -151,7 +151,7 @@ DEBUG=false
 LOG_LEVEL=INFO
 EOF
 
-chmod 600 centralized_api/.env
+chmod 600 api_v2/.env
 
 echo -e "${GREEN}✅ .env files created and secured${NC}"
 echo ""

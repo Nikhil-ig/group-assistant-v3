@@ -113,9 +113,9 @@ main() {
         exit 1
     fi
     
-    if [ ! -f "centralized_api/.env" ]; then
-        log_error "centralized_api/.env not found! Please create it manually on VPS."
-        log_error "Template: centralized_api/.env.example"
+    if [ ! -f "api_v2/.env" ]; then
+        log_error "api_v2/.env not found! Please create it manually on VPS."
+        log_error "Template: api_v2/.env.example"
         exit 1
     fi
     
@@ -182,12 +182,12 @@ main() {
     sleep 5
     
     # Try to reach API
-    if curl -f http://localhost:8000/api/health >/dev/null 2>&1; then
+    if curl -f http://localhost:8002/api/health >/dev/null 2>&1; then
         log_success "Centralized API is healthy"
     else
         log_error "Centralized API health check failed"
         log_error "Checking logs:"
-        docker compose logs centralized_api
+        docker compose logs api_v2
     fi
     
     log "======================================================================"
@@ -199,7 +199,7 @@ main() {
     log "📝 View logs:"
     log "  docker compose logs -f          # All services"
     log "  docker compose logs -f bot      # Bot only"
-    log "  docker compose logs -f centralized_api"
+    log "  docker compose logs -f api_v2"
     log ""
     log "🛑 To stop services: docker compose down"
     log "======================================================================"

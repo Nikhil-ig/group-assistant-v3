@@ -1,6 +1,6 @@
 # Web Service
 
-Independent web API and dashboard service that communicates with centralized_api.
+Independent web API and dashboard service that communicates with api_v2.
 
 ## 🌐 What This Service Does
 
@@ -9,14 +9,14 @@ Independent web API and dashboard service that communicates with centralized_api
 - **Real-time Updates** - WebSocket support for live data
 - **Admin Panel** - Manage groups, users, permissions
 - **Statistics & Analytics** - Group and system-wide stats
-- **Can be Deployed Independently** - On different server than centralized_api
+- **Can be Deployed Independently** - On different server than api_v2
 
 ## 🏗️ Folder Structure
 
 ```
 web/
 ├── app.py                   # FastAPI application setup
-├── client.py                # HTTP client for centralized_api
+├── client.py                # HTTP client for api_v2
 ├── config.py                # Configuration
 ├── endpoints/               # API endpoints
 │   ├── __init__.py
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Edit .env with:
-# - CENTRALIZED_API_URL (where centralized_api is running)
+# - API_V2_URL (where api_v2 is running)
 # - JWT_SECRET (for web authentication)
 ```
 
@@ -129,8 +129,8 @@ Edit `config.py` or `.env`:
 
 ```python
 # API
-CENTRALIZED_API_URL = "http://localhost:8000"
-CENTRALIZED_API_KEY = "shared-api-key"
+API_V2_URL = "http://localhost:8002"
+API_V2_KEY = "shared-api-key"
 
 # JWT
 JWT_SECRET = "your-secret-key-here"
@@ -187,7 +187,7 @@ User Login
     ↓
 Web API receives credentials
     ↓
-Validate with centralized_api
+Validate with api_v2
     ↓
 Generate JWT token
     ↓
@@ -202,7 +202,7 @@ Authenticated Request
     ↓
 Extract user_id from JWT
     ↓
-Call centralized_api/api/rbac/check-permission
+Call api_v2/api/rbac/check-permission
     ↓
 If allowed: Execute endpoint
 If denied: Return 403 Forbidden
@@ -211,12 +211,12 @@ If denied: Return 403 Forbidden
 ## 🛠️ Key Classes
 
 ### WebClient
-HTTP client for communicating with centralized_api:
+HTTP client for communicating with api_v2:
 
 ```python
 from web.client import WebClient
 
-client = WebClient(base_url="http://localhost:8000")
+client = WebClient(base_url="http://localhost:8002")
 
 # Get group details
 group = await client.get_group("group_123")
@@ -256,7 +256,7 @@ async def list_groups(
     ):
         raise HTTPException(status_code=403)
     
-    # Get groups from centralized_api
+    # Get groups from api_v2
     return await client.list_groups()
 ```
 
@@ -298,8 +298,8 @@ HTTP Request to Web API (port 8002)
     ↓
 Web Service
     ├─ Authenticate (JWT)
-    ├─ Check permission (centralized_api)
-    ├─ Fetch data (centralized_api)
+    ├─ Check permission (api_v2)
+    ├─ Fetch data (api_v2)
     └─ Transform response
     ↓
 HTTP Response (JSON)
@@ -315,7 +315,7 @@ docker build -t web-service .
 
 # Run container
 docker run -p 8002:8002 \
-  -e CENTRALIZED_API_URL=http://centralized-api:8000 \
+  -e API_V2_URL=http://api-v2:8002 \
   -e JWT_SECRET=your-secret-key \
   web-service
 ```
@@ -375,7 +375,7 @@ The dashboard will include:
 - Export capabilities
 - Mobile-responsive design
 
-## 🔄 Integration with centralized_api
+## 🔄 Integration with api_v2
 
 ### 1. Create Client
 
@@ -417,7 +417,7 @@ async def get_group(
     if not allowed:
         raise HTTPException(status_code=403)
     
-    # Get group from centralized_api
+    # Get group from api_v2
     group = await client.get_group(group_id)
     
     if not group:
@@ -434,11 +434,11 @@ async def get_group(
 
 ## 🆘 Troubleshooting
 
-### Cannot Connect to centralized_api
+### Cannot Connect to api_v2
 ```
-Error: Connection refused to http://localhost:8000
+Error: Connection refused to http://localhost:8002
 ```
-Solution: Start centralized_api first, check CENTRALIZED_API_URL
+Solution: Start api_v2 first, check API_V2_URL
 
 ### JWT Token Invalid
 ```
@@ -450,13 +450,13 @@ Solution: Re-login to get new token
 ```
 Error: 403 Forbidden
 ```
-Solution: Check user permissions in centralized_api
+Solution: Check user permissions in api_v2
 
 ## 🎯 Status
 
 ✅ REST API ready
 ✅ Authentication system ready
-✅ centralized_api integration ready
+✅ api_v2 integration ready
 🔜 WebSocket support
 🔜 Beautiful dashboard
 🔜 Analytics graphs

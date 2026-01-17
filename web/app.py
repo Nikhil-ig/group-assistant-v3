@@ -1,7 +1,7 @@
 """
 Web Service - FastAPI Application
 REST API service for web dashboards and clients
-Communicates with centralized_api for business logic
+Communicates with api_v2 for business logic
 Provides authentication, user management, and dashboard APIs
 """
 
@@ -25,8 +25,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-CENTRALIZED_API_URL = os.getenv("CENTRALIZED_API_URL", "http://localhost:8000")
-CENTRALIZED_API_KEY = os.getenv("CENTRALIZED_API_KEY", "shared-api-key")
+API_V2_URL = os.getenv("API_V2_URL", "http://localhost:8002")
+API_V2_KEY = os.getenv("API_V2_KEY", "shared-api-key")
 SECRET_KEY = os.getenv("SECRET_KEY", "web-secret-key-change-in-production")
 
 
@@ -69,8 +69,8 @@ class ActionRequest(BaseModel):
 # CENTRALIZED API CLIENT
 # ============================================================================
 
-class CentralizedAPIClient:
-    """HTTP client for communicating with centralized_api"""
+class APIv2Client:
+    """HTTP client for communicating with api_v2"""
     
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
@@ -78,7 +78,7 @@ class CentralizedAPIClient:
         self.timeout = 30
     
     async def health_check(self) -> bool:
-        """Check if centralized_api is healthy"""
+        """Check if api_v2 is healthy"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -91,7 +91,7 @@ class CentralizedAPIClient:
             return False
     
     async def execute_action(self, action_data: dict) -> dict:
-        """Execute an action through centralized_api"""
+        """Execute an action through api_v2"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -107,7 +107,7 @@ class CentralizedAPIClient:
             return {"error": str(e)}
     
     async def get_users(self) -> dict:
-        """Get all users from centralized_api"""
+        """Get all users from api_v2"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -122,7 +122,7 @@ class CentralizedAPIClient:
             return {"error": str(e)}
     
     async def get_groups(self) -> dict:
-        """Get all groups from centralized_api"""
+        """Get all groups from api_v2"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -138,7 +138,7 @@ class CentralizedAPIClient:
 
 
 # Global instances
-_api_client: Optional[CentralizedAPIClient] = None
+_api_client: Optional[APIv2Client] = None
 
 
 async def init_services():
@@ -149,9 +149,9 @@ async def init_services():
         logger.info("🚀 Initializing Web Service...")
         
         # Initialize API client
-        _api_client = CentralizedAPIClient(CENTRALIZED_API_URL, CENTRALIZED_API_KEY)
+        _api_client = APIv2Client(API_V2_URL, API_V2_KEY)
         
-        # Check if centralized_api is healthy
+        # Check if api_v2 is healthy
         is_healthy = await _api_client.health_check()
         if is_healthy:
             logger.info("✅ Centralized API is healthy")
@@ -222,7 +222,7 @@ async def health_check() -> HealthResponse:
             "status": "healthy",
             "service": "web_service",
             "version": "1.0.0",
-            "centralized_api": "connected" if is_centralized_healthy else "disconnected"
+            "api_v2": "connected" if is_centralized_healthy else "disconnected"
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -274,7 +274,7 @@ async def create_user(user_data: dict):
         if _api_client is None:
             raise HTTPException(status_code=503, detail="Service not initialized")
         
-        # This would be implemented in centralized_api
+        # This would be implemented in api_v2
         raise HTTPException(status_code=501, detail="Not yet implemented")
     except HTTPException:
         raise
@@ -314,7 +314,7 @@ async def create_group(group_data: dict):
         if _api_client is None:
             raise HTTPException(status_code=503, detail="Service not initialized")
         
-        # This would be implemented in centralized_api
+        # This would be implemented in api_v2
         raise HTTPException(status_code=501, detail="Not yet implemented")
     except HTTPException:
         raise
@@ -359,7 +359,7 @@ async def get_dashboard_stats():
         if _api_client is None:
             raise HTTPException(status_code=503, detail="Service not initialized")
         
-        # Get stats from centralized_api
+        # Get stats from api_v2
         users = await _api_client.get_users()
         groups = await _api_client.get_groups()
         

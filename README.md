@@ -1,12 +1,12 @@
 # V3 - Microservices Architecture
 
-This is a **production-ready microservices architecture** where each module can be deployed independently on different servers while communicating through the **centralized_api**.
+This is a **production-ready microservices architecture** where each module can be deployed independently on different servers while communicating through the **api_v2**.
 
 ## 🏗️ Architecture Overview
 
 ```
 v3/
-├── centralized_api/          # Core API service (shared backend)
+├── api_v2/          # Core API service (shared backend)
 │   ├── app.py               # FastAPI application
 │   ├── config.py            # Configuration management
 │   ├── models/              # Data models
@@ -19,14 +19,14 @@ v3/
 │   ├── main.py              # Bot entry point
 │   ├── handlers/            # Command handlers
 │   ├── middleware/          # Bot middleware
-│   ├── client.py            # centralized_api client
+│   ├── client.py            # api_v2 client
 │   ├── requirements.txt      # Dependencies
 │   └── README.md            # Setup guide
 │
 ├── web/                      # Web API service (independent deployment)
 │   ├── app.py               # FastAPI application
 │   ├── endpoints/           # API endpoints
-│   ├── client.py            # centralized_api client
+│   ├── client.py            # api_v2 client
 │   ├── dashboard/           # Web dashboard (future)
 │   ├── requirements.txt      # Dependencies
 │   └── README.md            # Setup guide
@@ -46,7 +46,7 @@ Each service can:
 - Be developed and tested separately
 
 ### 2. **Centralized API**
-The `centralized_api` provides:
+The `api_v2` provides:
 - Core business logic (RBAC, permissions, audit)
 - Database connections
 - Shared models and utilities
@@ -54,13 +54,13 @@ The `centralized_api` provides:
 
 ### 3. **Communication**
 Services communicate via:
-- REST API calls to `centralized_api`
+- REST API calls to `api_v2`
 - Async HTTP client (httpx)
 - Event-driven pub/sub (optional, Redis)
 
 ## 📦 Service Descriptions
 
-### centralized_api (Port 8000)
+### api_v2 (Port 8000)
 **Purpose:** Core backend with all business logic
 
 **Responsibilities:**
@@ -90,14 +90,14 @@ Services communicate via:
 **Responsibilities:**
 - Handle Telegram updates
 - Parse and execute bot commands
-- Validate permissions via centralized_api
-- Forward moderation actions to centralized_api
+- Validate permissions via api_v2
+- Forward moderation actions to api_v2
 - Stream user interactions
 
 **Key Files:**
 - `main.py` - Bot initialization and polling
 - `handlers/` - Command handlers
-- `client.py` - HTTP client for centralized_api calls
+- `client.py` - HTTP client for api_v2 calls
 - `middleware/` - Permission checking middleware
 
 **Dependencies:**
@@ -107,7 +107,7 @@ Services communicate via:
 
 **Can be deployed on:**
 - Dedicated server
-- Different machine than centralized_api
+- Different machine than api_v2
 - Docker container
 - Kubernetes pod
 
@@ -126,12 +126,12 @@ Services communicate via:
 **Key Files:**
 - `app.py` - FastAPI application
 - `endpoints/` - API route definitions
-- `client.py` - HTTP client for centralized_api calls
+- `client.py` - HTTP client for api_v2 calls
 - `dashboard/` - Frontend assets (future)
 
 **Can be deployed on:**
 - Dedicated server
-- Different machine than centralized_api
+- Different machine than api_v2
 - Docker container
 - Kubernetes pod
 
@@ -139,8 +139,8 @@ Services communicate via:
 
 ### Scenario 1: Single Machine (Development)
 ```
-localhost:8000 - centralized_api
-localhost:8001 - bot
+localhost:8002 - api_v2
+localhost:8002 - bot
 localhost:8002 - web
 ```
 
@@ -148,15 +148,15 @@ All services on same machine, communicate via localhost
 
 ### Scenario 2: Multiple Machines (Production)
 ```
-Server 1: centralized_api (8000)
+Server 1: api_v2 (8000)
   ├── MongoDB
   └── Redis (optional)
 
 Server 2: bot (8001)
-  └── Connects to Server 1:8000
+  └── Connects to Server 1:8002
 
 Server 3: web (8002)
-  └── Connects to Server 1:8000
+  └── Connects to Server 1:8002
 
 Server 4: nginx (load balancer)
   └── Routes requests to services
@@ -165,7 +165,7 @@ Server 4: nginx (load balancer)
 ### Scenario 3: Kubernetes (Enterprise)
 ```
 kubernetes/
-├── centralized-api-deployment.yaml
+├── api-v2-deployment.yaml
 ├── bot-deployment.yaml
 ├── web-deployment.yaml
 ├── services.yaml
@@ -184,7 +184,7 @@ docker-compose up
 ```
 
 This will start:
-- centralized_api on port 8000
+- api_v2 on port 8000
 - bot on port 8001
 - web on port 8002
 - MongoDB
@@ -193,8 +193,8 @@ This will start:
 ### 2. Or Start Manually
 
 ```bash
-# Terminal 1: centralized_api
-cd v3/centralized_api
+# Terminal 1: api_v2
+cd v3/api_v2
 pip install -r requirements.txt
 python app.py
 
@@ -212,11 +212,11 @@ python app.py
 ### 3. Test the System
 
 ```bash
-# Test centralized_api
-curl http://localhost:8000/api/health
+# Test api_v2
+curl http://localhost:8002/api/health
 
 # Test bot status
-curl http://localhost:8001/status
+curl http://localhost:8002/status
 
 # Test web API
 curl http://localhost:8002/api/health
@@ -230,7 +230,7 @@ User Command
 Bot (port 8001)
     ├─ Parse command
     ├─ Validate input
-    ├─ HTTP POST to centralized_api (8000)
+    ├─ HTTP POST to api_v2 (8000)
     │   └─ Check permissions
     │   └─ Execute action
     │   └─ Log to audit
@@ -241,7 +241,7 @@ Web Dashboard
     ↓
 Web API (port 8002)
     ├─ Receive HTTP request
-    ├─ HTTP call to centralized_api (8000)
+    ├─ HTTP call to api_v2 (8000)
     │   └─ Fetch data
     │   └─ Check permissions
     │   └─ Return result
@@ -254,7 +254,7 @@ Web API (port 8002)
 Each service has its own `.env` file:
 
 ```
-# centralized_api/.env
+# api_v2/.env
 MONGODB_URL=mongodb://mongo:27017
 DATABASE_NAME=bot_rbac
 SECRET_KEY=your-secret-key
@@ -262,17 +262,17 @@ JWT_EXPIRATION=3600
 
 # bot/.env
 TELEGRAM_BOT_TOKEN=your-bot-token
-CENTRALIZED_API_URL=http://centralized-api:8000
-CENTRALIZED_API_KEY=shared-api-key
+API_V2_URL=http://api-v2:8002
+API_V2_KEY=shared-api-key
 
 # web/.env
-CENTRALIZED_API_URL=http://centralized-api:8000
-CENTRALIZED_API_KEY=shared-api-key
+API_V2_URL=http://api-v2:8002
+API_V2_KEY=shared-api-key
 JWT_SECRET=your-secret-key
 ```
 
 ### API Authentication
-Services authenticate to centralized_api using:
+Services authenticate to api_v2 using:
 - API keys (for bot and web)
 - JWT tokens (for end users)
 - Role-based access control (RBAC)
@@ -281,16 +281,16 @@ Services authenticate to centralized_api using:
 
 ```
 bot (port 8001)
-    └─ depends on → centralized_api (8000)
+    └─ depends on → api_v2 (8000)
                       └─ MongoDB
                       └─ Redis (optional)
 
 web (port 8002)
-    └─ depends on → centralized_api (8000)
+    └─ depends on → api_v2 (8000)
                       └─ MongoDB
                       └─ Redis (optional)
 
-centralized_api (8000)
+api_v2 (8000)
     └─ depends on → MongoDB
     └─ depends on → Redis (optional)
 ```
@@ -299,7 +299,7 @@ centralized_api (8000)
 
 ### Phase 1 (Current)
 ✅ Microservices architecture
-✅ centralized_api core
+✅ api_v2 core
 ✅ bot service with RBAC
 ✅ web service basics
 
@@ -330,7 +330,7 @@ centralized_api (8000)
 
 - **README.md** (this file) - Overview
 - **ARCHITECTURE.md** - Detailed architecture
-- **centralized_api/README.md** - API setup
+- **api_v2/README.md** - API setup
 - **bot/README.md** - Bot setup
 - **web/README.md** - Web setup
 - **DEPLOYMENT.md** - Production deployment
@@ -340,8 +340,8 @@ centralized_api (8000)
 Each service has its own test suite:
 
 ```bash
-# Test centralized_api
-cd v3/centralized_api
+# Test api_v2
+cd v3/api_v2
 pytest tests/
 
 # Test bot
