@@ -2949,10 +2949,14 @@ async def cmd_send(message: Message):
             return
         
         args = message.text.split()
-        mode = args[1].lower() if len(args) > 1 else "send"
+        
+        # Determine mode - check if second arg is a recognized mode keyword
+        potential_mode = args[1].lower() if len(args) > 1 else "send"
+        recognized_modes = ["pin", "edit", "copy", "broadcast", "html", "schedule", "repeat", "notify", "silent", "reactive"]
+        mode = potential_mode if potential_mode in recognized_modes else "send"
         
         # ========== MODE 1: Normal Send (Default) ==========
-        if mode == "send" or message.reply_to_message or len(args) < 2:
+        if mode == "send" or message.reply_to_message:
             message_text = None
             reply_to_id = None
             
