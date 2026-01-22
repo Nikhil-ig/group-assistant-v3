@@ -28,6 +28,8 @@ from api_v2.routes.moderation_advanced import router as moderation_advanced_rout
 from api_v2.routes.whitelist_blacklist import router as whitelist_blacklist_router
 from api_v2.routes.night_mode import router as night_mode_router
 from api_v2.routes.message_operations import router as message_operations_router
+from api_v2.routes.new_commands import router as new_commands_router
+from api_v2.routes.behavior_filters import router as behavior_filters_router, set_database
 # Advanced features disabled for now - have circular dependencies
 # from api_v2.routes.advanced_features import router as advanced_features_router, set_engines
 # from api_v2.routes.enforcement import router as enforcement_router, set_enforcement_engine
@@ -70,6 +72,13 @@ async def lifespan(app: FastAPI):
                 logger.info("✅ Database indexes created")
             except Exception as e:
                 logger.warning(f"⚠️ Could not initialize indexes: {e}")
+            
+            # Initialize behavior filters database
+            try:
+                set_database(app.state.motor_db)
+                logger.info("✅ Behavior filters database initialized")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not initialize behavior filters: {e}")
         except Exception as e:
             logger.warning(f"⚠️ MongoDB not available: {e}. API will work in read-only mode.")
         
@@ -153,10 +162,8 @@ app.include_router(moderation_advanced_router)
 app.include_router(whitelist_blacklist_router)
 app.include_router(night_mode_router)
 app.include_router(message_operations_router)
-app.include_router(moderation_advanced_router)
-app.include_router(whitelist_blacklist_router)
-app.include_router(night_mode_router)
-app.include_router(whitelist_blacklist_router)
+app.include_router(new_commands_router)
+app.include_router(behavior_filters_router)
 # Advanced features disabled for now - have circular dependencies
 # app.include_router(advanced_features_router)
 # app.include_router(enforcement_router)

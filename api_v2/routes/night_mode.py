@@ -85,7 +85,7 @@ def get_next_transition_time(start_str: str, end_str: str) -> str:
 async def get_night_mode_settings(group_id: int) -> Optional[Dict[str, Any]]:
     """Fetch night mode settings from database"""
     try:
-        db_manager = await get_db_manager()
+        db_manager = get_db_manager()
         if not db_manager:
             return None
         
@@ -100,7 +100,7 @@ async def get_night_mode_settings(group_id: int) -> Optional[Dict[str, Any]]:
 async def save_night_mode_settings(group_id: int, settings: dict) -> bool:
     """Save night mode settings to database"""
     try:
-        db_manager = await get_db_manager()
+        db_manager = get_db_manager()
         if not db_manager:
             return False
         
@@ -454,4 +454,62 @@ async def list_exemptions(group_id: int):
         }
     except Exception as e:
         logger.error(f"Error listing exemptions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/toggle-exempt/{user_id}", response_model=Dict[str, Any])
+async def toggle_exempt_user(group_id: int, user_id: int):
+    """Toggle night mode exemption for a user"""
+    try:
+        # Get current settings
+        settings = await get_night_mode_settings(group_id)
+        is_exempt = False
+        
+        if not settings:
+            # Create new settings with user exempt
+            settings = {
+                "group_id": group_id,
+                "enabled": False,
+                "start_time": "22:00",
+                "end_time": "08:00",
+                "restricted_content_types": ["stickers", "gifs", "media", "voice"],
+                "exempt_user_ids": [user_id],
+                "exempt_roles": []
+            }
+            is_exempt = True
+        else:
+            # Toggle exemption status
+            exempt_list = settings.get("exempt_user_ids", [])
+            if user_id in exempt_list:
+                # Remove from exemption
+                exempt_list.remove(user_id)
+                is_exempt = False
+            else:
+                # Add to exemption
+                exempt_list.append(user_id)
+                is_exempt = True
+            
+            settings["exempt_user_ids"] = exempt_list
+        
+        # Save updated settings
+        db_manager = get_db_manager()
+        if db_manager:
+            collection = db_manager.db.night_mode_settings
+            settings["updated_at"] = datetime.utcnow()
+            
+            await collection.update_one(
+                {"group_id": group_id},
+                {"$set": settings},
+                upsert=True
+            )
+        
+        return {
+            "status": "success",
+            "group_id": group_id,
+            "user_id": user_id,
+            "is_exempt": is_exempt,
+            "message": f"User {'added to' if is_exempt else 'removed from'} night mode exemptions"
+        }
+    except Exception as e:
+        logger.error(f"Error toggling exemption: {e}")
         raise HTTPException(status_code=500, detail=str(e))

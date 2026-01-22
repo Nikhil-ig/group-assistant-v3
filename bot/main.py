@@ -78,16 +78,19 @@ def encode_callback_data(action: str, user_id: int, group_id: int) -> str:
     CALLBACK_DATA_CACHE[callback_id] = {
         "action": action,
         "user_id": user_id,
-        "group_id": group_id
+        "group_id": group_id,
+        "created_at": __import__('time').time()  # Track when created for timeout
     }
     CALLBACK_COUNTER += 1
     
     # Keep memory usage bounded: remove old entries if cache gets too large
-    if len(CALLBACK_DATA_CACHE) > 10000:
-        # Remove oldest 1000 entries
-        old_keys = list(CALLBACK_DATA_CACHE.keys())[:1000]
+    # Increased from 10000 to 50000 to handle more active buttons
+    if len(CALLBACK_DATA_CACHE) > 50000:
+        # Remove oldest 5000 entries
+        old_keys = list(CALLBACK_DATA_CACHE.keys())[:5000]
         for key in old_keys:
             del CALLBACK_DATA_CACHE[key]
+        logger.debug(f"Cleaned callback cache: removed {len(old_keys)} old entries")
     
     return callback_id
 
@@ -447,13 +450,14 @@ class APIv2Client:
         2. Admin permission checks (admin can perform action)
         3. Target user status
         4. Admin restrictions (admin not muted/restricted)
+        5. Current restrictions on the user
         
         Returns dict with:
         - can_proceed: boolean (overall pass/fail)
-        - status: "ok" or error message
+        - status: "ok" or error message with emoji
         - reason: explanation
         - checks: dict with each check result
-        - current_restrictions: list of active restrictions
+        - current_restrictions: list of active restrictions on user
         """
         try:
             async with httpx.AsyncClient() as client:
@@ -470,13 +474,32 @@ class APIv2Client:
                 response.raise_for_status()
                 result = response.json()
                 
+                # Generate user-friendly status message based on current restrictions
+                status = result.get("status", "ok")
+                current_restrictions = result.get("current_restrictions", [])
+                
+                # Build a descriptive message based on current state
+                if not result.get("can_proceed"):
+                    if current_restrictions:
+                        # Format the restrictions nicely
+                        if "banned" in str(current_restrictions).lower():
+                            status = "🔴 User is already BANNED"
+                        elif "muted" in str(current_restrictions).lower():
+                            status = "🔇 User is already MUTED"
+                        elif "restricted" in str(current_restrictions).lower():
+                            status = "🔒 User is already RESTRICTED"
+                        elif "warned" in str(current_restrictions).lower():
+                            status = "⚠️ User is already WARNED"
+                        else:
+                            status = f"⚠️ User already has restrictions: {', '.join(current_restrictions)}"
+                
                 # Map response to expected format
                 return {
                     "can_proceed": result.get("can_proceed", True),
-                    "status": result.get("status", "ok"),
+                    "status": status,
                     "reason": result.get("reason", ""),
                     "checks": result.get("checks", {}),
-                    "current_restrictions": result.get("current_restrictions", [])
+                    "current_restrictions": current_restrictions
                 }
         except Exception as e:
             logger.warning(f"Failed to validate pre-action: {e}")
@@ -646,9 +669,10 @@ async def check_user_current_status(user_id: int, group_id: int, api_client: 'AP
     
     Returns: 
     - "ok" if action can proceed
-    - "🔴 ALREADY BANNED" / "🔇 ALREADY MUTED" if duplicate
-    - "� ADMIN_MUTED" if admin is muted
-    - "❌ SELF_ACTION" if trying to ban themselves
+    - "🔴 User is already BANNED" if already banned
+    - "🔇 User is already MUTED" if already muted
+    - "🔒 User is already RESTRICTED" if already restricted
+    - "⚠️ User is already WARNED" if already warned
     - etc.
     """
     try:
@@ -660,15 +684,88 @@ async def check_user_current_status(user_id: int, group_id: int, api_client: 'AP
             action_type
         )
         
-        # Return the status (emoji message or "ok")
+        # Return the status
         if result.get("can_proceed"):
             return "ok"
         else:
-            return result.get("status", "ok")
+            # Get the current restrictions to provide detailed message
+            current_restrictions = result.get("current_restrictions", [])
+            status = result.get("status", "ok")
+            
+            # Map restrictions to user-friendly messages
+            action_messages = {
+                "ban": "🔴 User is already BANNED",
+                "unban": "⚠️ User is not banned (cannot unban)",
+                "kick": "👢 User is not in group (already kicked or left)",
+                "mute": "🔇 User is already MUTED",
+                "unmute": "🔊 User is not muted (cannot unmute)",
+                "restrict": "🔒 User is already RESTRICTED",
+                "unrestrict": "🔓 User is not restricted (cannot unrestrict)",
+                "warn": "⚠️ User is already WARNED",
+                "promote": "⬆️ User is already ADMIN",
+                "demote": "⬇️ User is not admin (cannot demote)",
+            }
+            
+            # Use the message from the map, or the API status
+            message = action_messages.get(action_type, status)
+            
+            # If we have current restrictions, add them to the message
+            if current_restrictions:
+                restriction_str = ", ".join(current_restrictions)
+                return f"{message}\n\n📋 <b>Current Restrictions:</b> {restriction_str}"
+            
+            return message
     except Exception as e:
         logger.warning(f"Error checking user status: {e}")
         return "ok"  # Proceed if check fails (fail open)
 
+
+
+async def get_reply_to_message_id(message: Message) -> Optional[int]:
+    """Extract reply_to_message_id from a message.
+    
+    If message.reply_to_message exists, return its message_id.
+    Otherwise return None.
+    """
+    if message.reply_to_message:
+        return message.reply_to_message.message_id
+    return None
+
+
+async def send_message_with_reply(message: Message, text: str, parse_mode=None, reply_markup=None, **kwargs):
+    """Send a message that replies to the original message if the command was a reply.
+    
+    If message.reply_to_message exists, replies to that message.
+    Otherwise, sends a normal message to the group.
+    
+    Returns the sent message.
+    """
+    try:
+        if message.reply_to_message:
+            # Reply to the original message
+            return await message.reply_to_message.reply(
+                text, 
+                parse_mode=parse_mode, 
+                reply_markup=reply_markup,
+                **kwargs
+            )
+        else:
+            # Send normally to the group
+            return await message.answer(
+                text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                **kwargs
+            )
+    except Exception as e:
+        logger.error(f"Failed to send message with reply: {e}")
+        # Fallback to normal answer
+        return await message.answer(
+            text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            **kwargs
+        )
 
 
 async def send_and_delete(message: Message, text: str, delay: int = 5, event_type: str = "command", **kwargs):
@@ -695,7 +792,7 @@ async def send_and_delete(message: Message, text: str, delay: int = 5, event_typ
         except Exception as e:
             logger.debug(f"Could not determine delete preference from API: {e}")
 
-        sent_msg = await message.answer(text, **kwargs)
+        sent_msg = await message.answer(text, reply_to_message_id=kwargs.pop('reply_to_message_id', None), **kwargs)
 
         if do_delete and delay and delay > 0:
             await asyncio.sleep(delay)
@@ -708,7 +805,13 @@ async def send_and_delete(message: Message, text: str, delay: int = 5, event_typ
 
 
 async def send_action_response(message: Message, action: str, user_id: int, success: bool, error: Optional[str] = None, delay: int = 5):
-    """Send a beautiful formatted action response with auto-delete and action buttons"""
+    """Send a beautiful formatted action response with auto-delete and action buttons
+    
+    If the command was a reply, reply to the target user's message.
+    Otherwise, send to the group normally.
+    
+    Shows user's full name as clickable mention link.
+    """
     if success:
         emoji_map = {
             "ban": "🔨",
@@ -751,23 +854,70 @@ async def send_action_response(message: Message, action: str, user_id: int, succ
         
         text = action_text.get(action, action)
         
-        # Beautiful formatted response
+        # Get user's full name for clickable mention
+        user_name = str(user_id)  # Fallback to user_id
+        try:
+            member = await bot.get_chat_member(message.chat.id, user_id)
+            user_obj = member.user
+            if user_obj.first_name:
+                user_name = user_obj.first_name
+                if user_obj.last_name:
+                    user_name += f" {user_obj.last_name}"
+            elif user_obj.username:
+                user_name = f"@{user_obj.username}"
+        except Exception as e:
+            logger.debug(f"Could not fetch user name: {e}")
+        
+        # Get admin's name who executed the command
+        admin_name = message.from_user.first_name or f"Admin {message.from_user.id}"
+        if message.from_user.last_name:
+            admin_name += f" {message.from_user.last_name}"
+        
+        # Create clickable user mention link with full name
+        user_link = f"<a href=\"tg://user?id={user_id}\">{user_name}</a>"
         response = (
             f"╔═══════════════════════════════════╗\n"
             f"║ {emoji} <b>ACTION EXECUTED</b>     ║\n"
             f"╚═══════════════════════════════════╝\n\n"
-            f"<b>📌 User ID:</b> <code>{user_id}</code>\n"
+            f"<b>👤 Admin:</b> {admin_name}\n"
+            f"<b>🎯 Target:</b> {user_link}\n"
             f"<b>⚡ Action:</b> <code>{action.upper()}</code>\n"
             f"<b>✅ Status:</b> <code>SUCCESS</code>\n"
             f"<b>📍 Result:</b> <i>User {text}</i>\n\n"
             f"🚀 <b>Next Actions Available Below ↓</b>"
         )
         
+        
         # Build action buttons based on current action
         keyboard = build_action_keyboard(action, user_id, message.chat.id)
         
         try:
-            sent_msg = await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            # Reply to the TARGET USER's message (on target message feature)
+            # This creates a visual thread showing:
+            # - Target user's original message
+            # - Bot's action response (threaded to that message)
+            # Works for all scenarios:
+            # 1. Reply mode: /command (replying to target message) → replies to target
+            # 2. Direct mode: /command user_id → finds and replies to target's message
+            
+            target_message_id = None
+            
+            # If replying to a message, use that message's ID
+            if message.reply_to_message:
+                target_message_id = message.reply_to_message.message_id
+            else:
+                # In direct mode, try to find the target user's recent message
+                # For now, we'll just reply to the command message as fallback
+                target_message_id = message.message_id
+            
+            sent_msg = await message.bot.send_message(
+                chat_id=message.chat.id,
+                text=response,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                reply_to_message_id=target_message_id  # Reply to TARGET's message
+            )
+            
             # Action response messages with buttons are NOT auto-deleted - user can interact with buttons
             # These messages provide important action history and quick-action capabilities
             await log_command_execution(message, action, success=True, result=None, args=f"user_{user_id}")
@@ -918,13 +1068,132 @@ def parse_user_reference(text: str) -> tuple[Optional[int], str]:
         return None, text
 
 
+def extract_user_id_from_text(text: str) -> Optional[int]:
+    """
+    Extract user ID from text content using various patterns.
+    
+    Supports patterns:
+    - <code>123456789</code>
+    - 123456789 (8-10 digit number)
+    - User ID: 123456789
+    - ID: 123456789
+    
+    Returns: user_id (int) or None
+    """
+    import re
+    
+    if not text:
+        return None
+    
+    # Pattern 1: HTML code block format - <code>123456789</code>
+    code_match = re.search(r'<code>(\d+)</code>', text)
+    if code_match:
+        try:
+            user_id = int(code_match.group(1))
+            if user_id > 100000:  # Valid Telegram ID threshold
+                return user_id
+        except (ValueError, IndexError):
+            pass
+    
+    # Pattern 2: Plain "User ID: 123456789" or similar
+    prefix_match = re.search(r'(?:user\s*id|id|user)[\s:]*(\d{8,10})', text, re.IGNORECASE)
+    if prefix_match:
+        try:
+            user_id = int(prefix_match.group(1))
+            if user_id > 100000:
+                return user_id
+        except ValueError:
+            pass
+    
+    # Pattern 3: Direct 8-10 digit number (as last resort)
+    id_match = re.search(r'\b(\d{8,10})\b', text)
+    if id_match:
+        try:
+            user_id = int(id_match.group(1))
+            if user_id > 100000:
+                return user_id
+        except ValueError:
+            pass
+    
+    return None
+
+
+def extract_mentions_from_text(text: str) -> list[str]:
+    """
+    Extract @mentions from text.
+    
+    Returns: List of usernames found (without @)
+    """
+    import re
+    
+    if not text:
+        return []
+    
+    # Find all @mentions
+    mentions = re.findall(r'@(\w+)', text)
+    return list(set(mentions))  # Return unique mentions
+
+
 async def get_user_id_from_reply(message: Message) -> Optional[int]:
     """
     Get user_id from replied message if available.
     Returns user_id of message author or None.
+    
+    Supports three scenarios:
+    1. User replies to another user's message
+       → Extract from replied message's from_user
+    2. User replies to bot's message (extracts target from bot message)
+       → Parse user ID from message text/caption
+    3. Mentions in replied message
+       → Extract @mentions and find corresponding user
+    
+    Priority order:
+    1. Direct from_user (highest confidence)
+    2. User ID extracted from message text
+    3. Mentions in message (requires further processing)
     """
-    if message.reply_to_message and message.reply_to_message.from_user:
-        return message.reply_to_message.from_user.id
+    if not message.reply_to_message:
+        return None
+    
+    reply_msg = message.reply_to_message
+    
+    # SCENARIO 1: Direct user message (original behavior - highest priority)
+    # User replied to another user's message
+    if reply_msg.from_user and not reply_msg.from_user.is_bot:
+        return reply_msg.from_user.id
+    
+    # SCENARIO 2: Extract user ID from bot's message text/caption
+    # When replying to bot's informational messages that contain user IDs
+    
+    # Try message text first
+    if reply_msg.text:
+        user_id = extract_user_id_from_text(reply_msg.text)
+        if user_id:
+            return user_id
+    
+    # Try caption if message has media
+    if reply_msg.caption:
+        user_id = extract_user_id_from_text(reply_msg.caption)
+        if user_id:
+            return user_id
+    
+    # SCENARIO 3: Extract mentions from replied message
+    # When message contains @mentions that could reference a user
+    mentions = []
+    
+    if reply_msg.text:
+        mentions.extend(extract_mentions_from_text(reply_msg.text))
+    
+    if reply_msg.caption:
+        mentions.extend(extract_mentions_from_text(reply_msg.caption))
+    
+    # If we found mentions, try to resolve the first one via API
+    # (This would require additional API call to resolve username to ID)
+    # For now, we return None and let the command handler deal with username resolution
+    if mentions:
+        # Could add username resolution here if needed
+        pass
+    
     return None
 
 
@@ -1017,6 +1286,52 @@ async def is_user_exempt(user_id: int, group_id: int) -> bool:
     return False
 
 
+async def get_user_data(user_id: int) -> dict:
+    """
+    Get user data from Telegram API.
+    
+    Args:
+        user_id: The Telegram user ID
+    
+    Returns:
+        Dictionary with user data including:
+        - first_name: User's first name
+        - username: User's username (if available)
+        - is_bot: Whether user is a bot
+        - id: User ID
+    """
+    try:
+        if not bot:
+            logger.warning("Bot not initialized when calling get_user_data")
+            return {
+                "id": user_id,
+                "first_name": "Unknown",
+                "username": None,
+                "is_bot": False
+            }
+        
+        # Get user chat info from Telegram API
+        user_chat = await bot.get_chat(user_id)
+        
+        return {
+            "id": user_chat.id,
+            "first_name": user_chat.first_name or "Unknown",
+            "username": user_chat.username,
+            "is_bot": user_chat.is_bot,
+            "last_name": user_chat.last_name
+        }
+    except Exception as e:
+        logger.debug(f"Failed to get user data for {user_id}: {e}")
+        # Return default data on error
+        return {
+            "id": user_id,
+            "first_name": "Unknown",
+            "username": None,
+            "is_bot": False,
+            "last_name": None
+        }
+
+
 # ============================================================================
 # COMMAND HANDLERS
 # ============================================================================
@@ -1050,7 +1365,8 @@ async def cmd_start(message: Message):
         "💡 <b>Pro Tip:</b> Use buttons for quick follow-up actions!\n"
     )
     
-    await message.answer(
+    await send_message_with_reply(
+        message,
         welcome_text,
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
@@ -1095,7 +1411,8 @@ async def cmd_help(message: Message):
         "💡 <b>Tap category buttons for detailed help!</b>"
     )
     
-    await message.answer(
+    await send_message_with_reply(
+        message,
         help_text,
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
@@ -1110,11 +1427,8 @@ async def cmd_status(message: Message):
         status_text = "Healthy" if is_healthy else "Unhealthy"
         status_color = "🟢" if is_healthy else "🔴"
         
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Refresh", callback_data="status"),
-             InlineKeyboardButton(text="📊 Details", callback_data="status_details")],
-            [InlineKeyboardButton(text="🏠 Home", callback_data="start")]
-        ])
+        # Simple status report without buttons
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
         
         status_report = (
             f"╔═══════════════════════════════════════╗\n"
@@ -1135,7 +1449,8 @@ async def cmd_status(message: Message):
             f"🎯 <b>All Systems Operational!</b>"
         )
         
-        await message.answer(
+        await send_message_with_reply(
+            message,
             status_report,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
@@ -1148,6 +1463,654 @@ async def cmd_status(message: Message):
             "Please try again in a moment."
         )
         await send_and_delete(message, error_msg, 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: CAPTCHA
+# ============================================================================
+
+async def cmd_captcha(message: Message):
+    """Enable/disable captcha verification for new members"""
+    try:
+        chat_id = message.chat.id
+        
+        # Check admin status
+        member = await bot.get_chat_member(chat_id, message.from_user.id)
+        if member.status not in ("administrator", "creator"):
+            await send_and_delete(message, "❌ You must be an admin to use this command", delay=5)
+            return
+        
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+        
+        if not args:
+            await send_and_delete(message, 
+                "❌ Usage: /captcha on|off [difficulty: easy|medium|hard]\n"
+                "Example: /captcha on medium", delay=6)
+            return
+        
+        action = args[0].lower()
+        difficulty = args[1].lower() if len(args) > 1 else "medium"
+        
+        if action not in ("on", "off"):
+            await send_and_delete(message, "❌ Invalid action. Use 'on' or 'off'", delay=5)
+            return
+        
+        # Call API V2
+        result = await api_client.post(
+            "/groups/{}/captcha/enable".format(chat_id),
+            {
+                "group_id": chat_id,
+                "enabled": action == "on",
+                "difficulty": difficulty,
+                "timeout": 300
+            }
+        )
+        
+        status = "✅ Enabled" if action == "on" else "❌ Disabled"
+        msg = f"{status}\n\n<b>Captcha Verification</b>\n"
+        msg += f"<b>Status:</b> {'Enabled' if action == 'on' else 'Disabled'}\n"
+        msg += f"<b>Difficulty:</b> {difficulty}"
+        
+        await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+        await log_command_execution(message, "captcha", True, f"{action} {difficulty}")
+        
+    except Exception as e:
+        logger.error(f"Captcha command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: AFK (Away From Keyboard)
+# ============================================================================
+
+async def cmd_afk(message: Message):
+    """Set/clear Away From Keyboard status"""
+    try:
+        chat_id = message.chat.id
+        user_id = message.from_user.id
+        
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+        
+        if not args:
+            # Clear AFK
+            result = await api_client.post(
+                "/groups/{}/afk/clear".format(chat_id),
+                {"group_id": chat_id, "user_id": user_id}
+            )
+            
+            msg = "✅ <b>AFK Status Cleared</b>\n"
+            user_link = f"<a href=\"tg://user?id={user_id}\">{message.from_user.first_name or 'User'}</a>"
+            msg += f"Welcome back! {user_link}"
+            
+            await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=6)
+            await log_command_execution(message, "afk", True, "cleared")
+        else:
+            # Set AFK with message
+            afk_msg = " ".join(args) if args else "User is currently AFK"
+            
+            result = await api_client.post(
+                "/groups/{}/afk/set".format(chat_id),
+                {
+                    "group_id": chat_id,
+                    "user_id": user_id,
+                    "status": "set",
+                    "message": afk_msg,
+                    "duration": 3600
+                }
+            )
+            
+            msg = "✅ <b>AFK Status Set</b>\n"
+            user_link = f"<a href=\"tg://user?id={user_id}\">{message.from_user.first_name or 'User'}</a>"
+            msg += f"<b>User:</b> {user_link}\n"
+            msg += f"<b>Message:</b> {afk_msg}"
+            
+            await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=6)
+            await log_command_execution(message, "afk", True, f"set: {afk_msg}")
+    
+    except Exception as e:
+        logger.error(f"AFK command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: STATS
+# ============================================================================
+
+async def cmd_stats(message: Message):
+    """Get group or user statistics
+    Usage: /stats or /stats (reply to message) or /stats <period>
+    """
+    try:
+        chat_id = message.chat.id
+        target_user_id = message.from_user.id  # Default to self
+        
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+        period = args[0] if args and args[0] in ("1d", "3d", "7d", "30d", "all") else "7d"
+        
+        # Check if replying to a message (REPLY MODE - get stats for replied user)
+        if message.reply_to_message:
+            target_user_id = message.reply_to_message.from_user.id if message.reply_to_message.from_user else message.from_user.id
+        
+        # Get group stats
+        try:
+            group_stats = await api_client.get(f"/groups/{chat_id}/stats/group?period={period}")
+        except:
+            group_stats = {}
+        
+        # Get target user stats
+        try:
+            user_stats = await api_client.get(f"/groups/{chat_id}/stats/user/{target_user_id}?period={period}")
+        except:
+            user_stats = {}
+        
+        # Build message
+        is_self = target_user_id == message.from_user.id
+        if is_self:
+            msg = f"📊 <b>Your Statistics ({period})</b>\n\n"
+        else:
+            user_link = f"<a href=\"tg://user?id={target_user_id}\">User {target_user_id}</a>"
+            msg = f"📊 <b>Statistics for {user_link} ({period})</b>\n\n"
+        
+        msg += "<b>GROUP STATS:</b>\n"
+        if isinstance(group_stats, dict) and group_stats.get("data"):
+            data = group_stats["data"]
+            msg += f"  📝 Messages: {data.get('total_messages', '—')}\n"
+            msg += f"  👥 Active Users: {data.get('active_users', '—')}\n"
+            msg += f"  🆕 New Members: {data.get('new_members', '—')}\n"
+            msg += f"  ⚠️ Moderation: {data.get('moderation_actions', '—')}\n"
+        else:
+            msg += "  <i>No group data available</i>\n"
+        
+        if is_self:
+            msg += "\n<b>YOUR STATS:</b>\n"
+        else:
+            msg += "\n<b>USER STATS:</b>\n"
+        
+        if isinstance(user_stats, dict) and user_stats.get("data"):
+            data = user_stats["data"]
+            msg += f"  📝 Messages: {data.get('total_messages', '—')}\n"
+            msg += f"  ⭐ Activity Score: {data.get('activity_score', '—')}\n"
+            msg += f"  🏆 Rank: {data.get('rank', '—')}\n"
+            msg += f"  ⚠️ Warnings: {data.get('warnings', '—')}\n"
+        else:
+            msg += "  <i>No user data available</i>\n"
+        
+        msg += f"\n<i>Period: {period}</i>"
+        
+        await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=10)
+        await log_command_execution(message, "stats", True, f"{period} - user:{target_user_id}")
+        
+    except Exception as e:
+        logger.error(f"Stats command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: BROADCAST
+# ============================================================================
+
+async def cmd_broadcast(message: Message):
+    """Broadcast message to group (admin only)
+    Usage: /broadcast <message> or /broadcast (reply to message)
+    """
+    try:
+        chat_id = message.chat.id
+        
+        # Check admin status
+        member = await bot.get_chat_member(chat_id, message.from_user.id)
+        if member.status not in ("administrator", "creator"):
+            await send_and_delete(message, "❌ You must be an admin to use this command", delay=5)
+            return
+        
+        broadcast_msg = None
+        
+        # Check if replying to a message (REPLY MODE)
+        if message.reply_to_message:
+            reply_msg = message.reply_to_message
+            
+            # Get message content
+            if reply_msg.text:
+                broadcast_msg = reply_msg.text
+            elif reply_msg.caption:
+                broadcast_msg = reply_msg.caption
+            else:
+                # Media without text/caption
+                if reply_msg.photo:
+                    broadcast_msg = "[Shared Photo]"
+                elif reply_msg.video:
+                    broadcast_msg = "[Shared Video]"
+                elif reply_msg.document:
+                    broadcast_msg = "[Shared Document]"
+                else:
+                    broadcast_msg = "[Shared Media]"
+        else:
+            # Direct mode: parse from arguments
+            args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+            
+            if not args:
+                await send_and_delete(message, 
+                    "❌ Usage: /broadcast <message> or /broadcast (reply to message)\n"
+                    "Broadcasts a message to all members", delay=6)
+                return
+            
+            broadcast_msg = " ".join(args)
+        
+        if not broadcast_msg:
+            await send_and_delete(message, 
+                "❌ Could not broadcast. Please provide text or reply to a message.", 
+                delay=5)
+            return
+        
+        result = await api_client.post(
+            f"/groups/{chat_id}/broadcast",
+            {
+                "group_id": chat_id,
+                "message": broadcast_msg,
+                "parse_mode": "HTML",
+                "target": "all",
+                "initiated_by": message.from_user.id
+            }
+        )
+        
+        msg = "✅ <b>Broadcast Sent</b>\n\n"
+        msg += f"<b>Message:</b> {broadcast_msg[:100]}"
+        
+        await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+        await log_command_execution(message, "broadcast", True, broadcast_msg[:50])
+        
+    except Exception as e:
+        logger.error(f"Broadcast command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: SLOWMODE
+# ============================================================================
+
+async def cmd_slowmode(message: Message):
+    """Enable/disable slowmode"""
+    try:
+        chat_id = message.chat.id
+        
+        # Check admin status
+        member = await bot.get_chat_member(chat_id, message.from_user.id)
+        if member.status not in ("administrator", "creator"):
+            await send_and_delete(message, "❌ You must be an admin to use this command", delay=5)
+            return
+        
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+        
+        if not args:
+            await send_and_delete(message, 
+                "❌ Usage: /slowmode <interval_seconds> or /slowmode off\n"
+                "Example: /slowmode 5", delay=6)
+            return
+        
+        action = args[0].lower()
+        
+        if action == "off":
+            interval = 0
+            enabled = False
+        else:
+            try:
+                interval = int(action)
+                enabled = True
+            except ValueError:
+                await send_and_delete(message, "❌ Invalid interval. Use a number in seconds.", delay=5)
+                return
+        
+        result = await api_client.post(
+            f"/groups/{chat_id}/slowmode",
+            {
+                "group_id": chat_id,
+                "interval": interval,
+                "enabled": enabled
+            }
+        )
+        
+        if enabled:
+            msg = f"✅ <b>Slowmode Enabled</b>\n\n"
+            msg += f"<b>Interval:</b> {interval} seconds"
+        else:
+            msg = "❌ <b>Slowmode Disabled</b>"
+        
+        await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+        await log_command_execution(message, "slowmode", True, f"{interval}s")
+        
+    except Exception as e:
+        logger.error(f"Slowmode command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: ECHO
+# ============================================================================
+
+async def cmd_echo(message: Message):
+    """Echo/repeat a message
+    Usage: /echo <message> or /echo (reply to message)
+    """
+    try:
+        chat_id = message.chat.id
+        echo_msg = None
+        
+        # Check if replying to a message (REPLY MODE)
+        if message.reply_to_message:
+            # Echo the replied message (text or indicate media)
+            reply_msg = message.reply_to_message
+            
+            if reply_msg.text:
+                echo_msg = reply_msg.text
+            elif reply_msg.caption:
+                echo_msg = reply_msg.caption
+            else:
+                # Media without caption
+                if reply_msg.photo:
+                    echo_msg = "[Photo]"
+                elif reply_msg.video:
+                    echo_msg = "[Video]"
+                elif reply_msg.document:
+                    echo_msg = "[Document]"
+                elif reply_msg.audio:
+                    echo_msg = "[Audio]"
+                elif reply_msg.voice:
+                    echo_msg = "[Voice Message]"
+                elif reply_msg.animation:
+                    echo_msg = "[Animation]"
+                else:
+                    echo_msg = "[Media]"
+        else:
+            # Direct mode: parse from arguments
+            args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+            
+            if not args:
+                await send_and_delete(message, 
+                    "❌ Usage: /echo <message> or /echo (reply to message)\n"
+                    "Repeats the message you provide", delay=6)
+                return
+            
+            echo_msg = " ".join(args)
+        
+        if not echo_msg:
+            await send_and_delete(message, 
+                "❌ Could not echo message. Try providing text or replying to a message.", 
+                delay=5)
+            return
+        
+        result = await api_client.post(
+            f"/groups/{chat_id}/echo",
+            {
+                "group_id": chat_id,
+                "message": echo_msg,
+                "target_user_id": message.from_user.id
+            }
+        )
+        
+        await message.delete()
+        await bot.send_message(chat_id, echo_msg, parse_mode=ParseMode.HTML)
+        await log_command_execution(message, "echo", True, echo_msg[:50])
+        
+    except Exception as e:
+        logger.error(f"Echo command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: NOTES
+# ============================================================================
+
+async def cmd_notes(message: Message):
+    """Manage group notes
+    Usage: /notes (list) or /notes add <content> or /notes (reply to save as note)
+    """
+    try:
+        chat_id = message.chat.id
+        
+        # Check admin status
+        member = await bot.get_chat_member(chat_id, message.from_user.id)
+        if member.status not in ("administrator", "creator"):
+            await send_and_delete(message, "❌ You must be an admin to use this command", delay=5)
+            return
+        
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+        
+        # Check if replying to a message (REPLY MODE - auto-save as note)
+        if message.reply_to_message and not args:
+            reply_msg = message.reply_to_message
+            note_content = reply_msg.text or reply_msg.caption or "[Media]"
+            
+            # Limit note content length
+            if len(note_content) > 500:
+                note_content = note_content[:497] + "..."
+            
+            result = await api_client.post(
+                f"/groups/{chat_id}/notes",
+                {
+                    "group_id": chat_id,
+                    "content": note_content,
+                    "action": "create",
+                    "from_message_id": reply_msg.message_id
+                }
+            )
+            
+            msg = "✅ <b>Note Saved from Message</b>\n\n"
+            msg += f"<b>Content:</b> {note_content[:100]}"
+            
+            await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+            await log_command_execution(message, "notes", True, f"saved: {note_content[:30]}")
+            return
+        
+        if not args:
+            # List notes
+            result = await api_client.get(f"/groups/{chat_id}/notes")
+            
+            msg = "📝 <b>Group Notes</b>\n\n"
+            if isinstance(result, dict) and result.get("data"):
+                notes = result["data"].get("notes", [])
+                if notes:
+                    for note in notes:
+                        msg += f"<b>•</b> <code>{note.get('note_id')}</code>: {note.get('content', '')[:50]}\n"
+                else:
+                    msg += "No notes yet.\n"
+                    msg += "<b>Usage:</b>\n"
+                    msg += "  /notes add <content>\n"
+                    msg += "  /notes (reply to message)"
+            
+            await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+            await log_command_execution(message, "notes", True, "list")
+        
+        elif args[0].lower() == "add":
+            # Add note with explicit text
+            note_content = " ".join(args[1:]) if len(args) > 1 else None
+            
+            if not note_content:
+                await send_and_delete(message, "❌ Please provide note content", delay=5)
+                return
+            
+            result = await api_client.post(
+                f"/groups/{chat_id}/notes",
+                {
+                    "group_id": chat_id,
+                    "content": note_content,
+                    "action": "create"
+                }
+            )
+            
+            msg = "✅ <b>Note Added</b>\n\n"
+            msg += f"<b>Content:</b> {note_content[:100]}"
+            
+            await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+            await log_command_execution(message, "notes", True, f"add: {note_content[:30]}")
+        
+        else:
+            await send_and_delete(message, 
+                "❌ Usage:\n"
+                "  /notes - List all notes\n"
+                "  /notes add <content> - Add note\n"
+                "  /notes (reply) - Save message as note", 
+                parse_mode=ParseMode.HTML, delay=6)
+        
+    except Exception as e:
+        logger.error(f"Notes command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMANDS: VERIFY
+# ============================================================================
+
+async def cmd_verify(message: Message):
+    """Verify users (admin only)"""
+    try:
+        chat_id = message.chat.id
+        
+        # Check admin status
+        member = await bot.get_chat_member(chat_id, message.from_user.id)
+        if member.status not in ("administrator", "creator"):
+            await send_and_delete(message, "❌ You must be an admin to use this command", delay=5)
+            return
+        
+        args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+        
+        # Handle reply
+        target_user_id = None
+        if message.reply_to_message:
+            target_user_id = message.reply_to_message.from_user.id
+        elif args:
+            try:
+                target_user_id = int(args[0].lstrip("@")) if args[0].startswith("@") else int(args[0])
+            except (ValueError, IndexError):
+                await send_and_delete(message, "❌ Invalid user ID", delay=5)
+                return
+        
+        if not target_user_id:
+            await send_and_delete(message, 
+                "❌ Usage: /verify [user_id/@username] or reply to a message\n"
+                "Marks a user as verified", delay=6)
+            return
+        
+        action = args[1].lower() if len(args) > 1 else "verify"
+        
+        if action not in ("verify", "unverify"):
+            action = "verify"
+        
+        result = await api_client.post(
+            f"/groups/{chat_id}/verify",
+            {
+                "group_id": chat_id,
+                "user_id": target_user_id,
+                "action": action,
+                "reason": None
+            }
+        )
+        
+        status_text = "Verified ✅" if action == "verify" else "Unverified ❌"
+        user_link = f"<a href=\"tg://user?id={target_user_id}\">👤 User {target_user_id}</a>"
+        msg = f"<b>{user_link} {status_text}</b>\n"
+        msg += f"<b>Action:</b> {action}"
+        
+        await send_and_delete(message, msg, parse_mode=ParseMode.HTML, delay=8)
+        await log_command_execution(message, "verify", True, f"{action} {target_user_id}")
+        
+    except Exception as e:
+        logger.error(f"Verify command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
+                             parse_mode=ParseMode.HTML, delay=5)
+
+
+# ============================================================================
+# NEW COMMAND: ID - Show user details with profile picture
+# ============================================================================
+
+async def cmd_id(message: Message):
+    """Show user details with advanced profile information, role indicators, and premium badges"""
+    try:
+        chat_id = message.chat.id
+        
+        # Determine target user
+        target_user_id = None
+        
+        if message.reply_to_message:
+            target_user_id = message.reply_to_message.from_user.id
+        else:
+            args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+            if args:
+                try:
+                    target_user_id = int(args[0].lstrip("@")) if args[0].startswith("@") else int(args[0])
+                except (ValueError, IndexError):
+                    await send_and_delete(message, "❌ Invalid user ID or username", delay=5)
+                    return
+            else:
+                target_user_id = message.from_user.id
+        
+        # Get advanced user information
+        user_info = await get_advanced_user_info(target_user_id, chat_id)
+        
+        # Build enhanced message with advanced user info
+        premium_badge = " 💎 PREMIUM" if user_info['is_premium'] else ""
+        bot_badge = " 🤖 BOT" if user_info['is_bot'] else ""
+        
+        msg = (
+            f"<b>👥 USER INFORMATION</b>\n"
+            f"<b>IDENTITY:</b>\n"
+            f"  {user_info['mention_html']}{premium_badge}{bot_badge}\n"
+            f"  <b>Full Name:</b> {user_info['full_name']}\n"
+            f"  <b>User ID:</b> <code>{target_user_id}</code>\n"
+        )
+        
+        if user_info['username']:
+            msg += f"  <b>Username:</b> @{user_info['username']}\n"
+        
+        msg += f"\n<b>ROLE & STATUS:</b>\n"
+        msg += f"  <b>Role:</b> {user_info['role_text']}\n"
+        
+        if user_info['custom_title']:
+            msg += f"  <b>Title:</b> <i>{user_info['custom_title']}</i>\n"
+        
+        msg += f"\n<b>ACCOUNT INFO:</b>\n"
+        msg += f"  <b>Account Type:</b> {'🤖 Bot' if user_info['is_bot'] else '👤 User'}\n"
+        msg += f"  <b>Premium:</b> {'💎 YES' if user_info['is_premium'] else '❌ NO'}\n"
+        msg += f"  <b>Profile Photo:</b> {'✅ YES' if user_info['has_profile_photo'] else '❌ NO'}\n"
+        
+        # Show admin-specific permissions if applicable
+        if user_info['role'] == 'administrator':
+            msg += f"\n<b>ADMIN PERMISSIONS:</b>\n"
+            msg += f"  • Can post messages: {'✅' if user_info['permissions'].get('can_post_messages') else '❌'}\n"
+            msg += f"  • Can delete messages: {'✅' if user_info['permissions'].get('can_delete_messages') else '❌'}\n"
+            msg += f"  • Can restrict members: {'✅' if user_info['permissions'].get('can_restrict_members') else '❌'}\n"
+            msg += f"  • Can promote members: {'✅' if user_info['permissions'].get('can_promote_members') else '❌'}\n"
+            msg += f"  • Can edit messages: {'✅' if user_info['permissions'].get('can_edit_messages') else '❌'}\n"
+        
+        # Try to send message with profile picture
+        try:
+            if user_info['has_profile_photo'] and user_info['profile_photo_id']:
+                await bot.send_photo(
+                    chat_id=message.chat.id,
+                    photo=user_info['profile_photo_id'],
+                    caption=msg,
+                    parse_mode=ParseMode.HTML,
+                    reply_to_message_id=message.message_id
+                )
+                await log_command_execution(message, "id", True, f"user {target_user_id} ({user_info['full_name']}) with photo")
+                return
+        except Exception as e:
+            logger.debug(f"Could not send profile photo: {e}")
+        
+        # Fallback: send as text message
+        await send_message_with_reply(message, msg, parse_mode=ParseMode.HTML)
+        await log_command_execution(message, "id", True, f"user {target_user_id} ({user_info['full_name']})")
+        
+    except Exception as e:
+        logger.error(f"ID command error: {e}")
+        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
                              parse_mode=ParseMode.HTML, delay=5)
 
 
@@ -1333,6 +2296,12 @@ async def cmd_ban(message: Message):
                 parse_mode=ParseMode.HTML, delay=5)
             return
         
+        # Check if user is already banned
+        status_check = await check_user_current_status(user_id, message.chat.id, api_client, "ban", message.from_user.id)
+        if status_check != "ok":
+            await send_and_delete(message, f"⚠️ {status_check}", parse_mode=ParseMode.HTML, delay=5)
+            return
+        
         action_data = {
             "action_type": "ban",
             "group_id": message.chat.id,
@@ -1371,13 +2340,13 @@ async def cmd_unban(message: Message):
             args = message.text.split(maxsplit=1)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/unban (reply to message)\n/unban <user_id|@username>")
+                await message.answer("Usage:\n/unban (reply to message)\n/unban <user_id|@username>", reply_to_message_id=message.message_id)
                 return
             
             user_id, _ = parse_user_reference(args[1])
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /unban <user_id|@username>")
+            await message.answer("❌ Could not identify user. Reply to a message or use /unban <user_id|@username>", reply_to_message_id=message.message_id)
             return
         
         action_data = {
@@ -1390,13 +2359,13 @@ async def cmd_unban(message: Message):
         result = await api_client.execute_action(action_data)
         
         if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None, reply_to_message_id=message.message_id)
         else:
-            await message.answer(f"✅ User {user_id} has been unbanned")
+            await message.answer(f"✅ User {user_id} has been unbanned", reply_to_message_id=message.message_id)
             
     except Exception as e:
         logger.error(f"Unban command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_kick(message: Message):
@@ -1432,6 +2401,9 @@ async def cmd_kick(message: Message):
                 "❌ Could not identify user.",
                 parse_mode=ParseMode.HTML, delay=5)
             return
+        
+        # Check if user is already kicked (no longer in group) - Optional check
+        # Kick doesn't have a "pre-kick" status like ban/mute, but we can still validate
         
         action_data = {
             "action_type": "kick",
@@ -1499,6 +2471,12 @@ async def cmd_mute(message: Message):
                                  parse_mode=ParseMode.HTML, delay=5)
             return
         
+        # Check if user is already muted
+        status_check = await check_user_current_status(user_id, message.chat.id, api_client, "mute", message.from_user.id)
+        if status_check != "ok":
+            await send_and_delete(message, f"⚠️ {status_check}", parse_mode=ParseMode.HTML, delay=5)
+            return
+        
         action_data = {
             "action_type": "mute",
             "group_id": message.chat.id,
@@ -1512,31 +2490,8 @@ async def cmd_mute(message: Message):
             await send_action_response(message, "mute", user_id, False, result.get("error"))
             await log_command_execution(message, "mute", success=False, result=result.get("error"), args=message.text)
         else:
-            # Show detailed response with duration info and action buttons
-            duration_text = "forever" if duration == 0 else f"for {duration} minutes"
-            emoji = "🔇"
-            
-            response = (
-                f"╔═══════════════════════════════════╗\n"
-                f"║ {emoji} <b>ACTION EXECUTED</b>          ║\n"
-                f"╚═══════════════════════════════════╝\n\n"
-                f"<b>📌 User ID:</b> <code>{user_id}</code>\n"
-                f"<b>⚡ Action:</b> <code>MUTE</code>\n"
-                f"<b>✅ Status:</b> <code>SUCCESS</code>\n"
-                f"<b>⏱️  Duration:</b> <i>{duration_text}</i>\n"
-                f"<b>📍 Result:</b> <i>User muted</i>\n\n"
-                f"🚀 <b>Next Actions Available Below ↓</b>"
-            )
-            
-            keyboard = build_action_keyboard("mute", user_id, message.chat.id)
-            
-            try:
-                sent_msg = await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-                # Action messages with buttons are NOT auto-deleted - user can interact with them
-                await log_command_execution(message, "mute", success=True, result=None, args=message.text)
-            except Exception as e:
-                logger.error(f"Failed to send mute response: {e}")
-                await log_command_execution(message, "mute", success=False, result=str(e), args=message.text)
+            await send_action_response(message, "mute", user_id, True)
+            await log_command_execution(message, "mute", success=True, result=None, args=message.text)
             
     except Exception as e:
         logger.error(f"Mute command failed: {e}")
@@ -1568,13 +2523,19 @@ async def cmd_unmute(message: Message):
             args = message.text.split(maxsplit=1)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/unmute (reply to message)\n/unmute <user_id|@username>")
+                await message.answer("Usage:\n/unmute (reply to message)\n/unmute <user_id|@username>", reply_to_message_id=message.message_id)
                 return
             
             user_id, _ = parse_user_reference(args[1])
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /unmute <user_id|@username>")
+            await message.answer("❌ Could not identify user. Reply to a message or use /unmute <user_id|@username>", reply_to_message_id=message.message_id)
+            return
+        
+        # Check if user is not muted (can't unmute)
+        status_check = await check_user_current_status(user_id, message.chat.id, api_client, "unmute", message.from_user.id)
+        if status_check != "ok":
+            await send_and_delete(message, f"⚠️ {status_check}", parse_mode=ParseMode.HTML, delay=5)
             return
         
         action_data = {
@@ -1590,34 +2551,12 @@ async def cmd_unmute(message: Message):
             await send_action_response(message, "unmute", user_id, False, result.get("error"))
             await log_command_execution(message, "unmute", success=False, result=result.get("error"), args=message.text)
         else:
-            # Show detailed response with action buttons
-            emoji = "🔊"
-            
-            response = (
-                f"╔═══════════════════════════════════╗\n"
-                f"║ {emoji} <b>ACTION EXECUTED</b>          ║\n"
-                f"╚═══════════════════════════════════╝\n\n"
-                f"<b>📌 User ID:</b> <code>{user_id}</code>\n"
-                f"<b>⚡ Action:</b> <code>UNMUTE</code>\n"
-                f"<b>✅ Status:</b> <code>SUCCESS</code>\n"
-                f"<b>📍 Result:</b> <i>User unmuted</i>\n\n"
-                f"🚀 <b>Next Actions Available Below ↓</b>"
-            )
-            
-            keyboard = build_action_keyboard("unmute", user_id, message.chat.id)
-            
-            try:
-                sent_msg = await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-                # Action messages with buttons are NOT auto-deleted - user can interact with them
-                await log_command_execution(message, "unmute", success=True, result="User unmuted successfully", args=message.text)
-            except Exception as e:
-                logger.error(f"Failed to send unmute response: {e}")
-                await log_command_execution(message, "unmute", success=False, result=str(e), args=message.text)
+            await send_action_response(message, "unmute", user_id, True)
+            await log_command_execution(message, "unmute", success=True, result="User unmuted successfully", args=message.text)
             
     except Exception as e:
         logger.error(f"Unmute command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}")
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_pin(message: Message):
@@ -1641,11 +2580,11 @@ async def cmd_pin(message: Message):
             try:
                 message_id = int(args[1])
             except ValueError:
-                await message.answer("❌ Invalid message ID")
+                await message.answer("❌ Invalid message ID", reply_to_message_id=message.message_id)
                 return
         
         if not message_id:
-            await message.answer("Usage:\n/pin (reply to message)\n/pin <message_id>")
+            await message.answer("Usage:\n/pin (reply to message)\n/pin <message_id>", reply_to_message_id=message.message_id)
             return
         
         action_data = {
@@ -1658,15 +2597,15 @@ async def cmd_pin(message: Message):
         result = await api_client.execute_action(action_data)
         
         if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None, reply_to_message_id=message.message_id)
             await log_command_execution(message, "pin", success=False, result=result.get("error"), args=message.text)
         else:
-            await message.answer(f"✅ Message {message_id} has been pinned")
+            await message.answer(f"✅ Message {message_id} has been pinned", reply_to_message_id=message.message_id)
             await log_command_execution(message, "pin", success=True, result=None, args=message.text)
             
     except Exception as e:
         logger.error(f"Pin command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_unpin(message: Message):
@@ -1689,11 +2628,11 @@ async def cmd_unpin(message: Message):
             try:
                 message_id = int(args[1])
             except ValueError:
-                await message.answer("❌ Invalid message ID")
+                await message.answer("❌ Invalid message ID", reply_to_message_id=message.message_id)
                 return
         
         if not message_id:
-            await message.answer("Usage:\n/unpin (reply to message)\n/unpin <message_id>")
+            await message.answer("Usage:\n/unpin (reply to message)\n/unpin <message_id>", reply_to_message_id=message.message_id)
             return
         
         action_data = {
@@ -1706,15 +2645,15 @@ async def cmd_unpin(message: Message):
         result = await api_client.execute_action(action_data)
         
         if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None, reply_to_message_id=message.message_id)
             await log_command_execution(message, "unpin", success=False, result=result.get("error"), args=message.text)
         else:
-            await message.answer(f"✅ Message {message_id} has been unpinned")
+            await message.answer(f"✅ Message {message_id} has been unpinned", reply_to_message_id=message.message_id)
             await log_command_execution(message, "unpin", success=True, result=None, args=message.text)
             
     except Exception as e:
         logger.error(f"Unpin command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_promote(message: Message):
@@ -1743,14 +2682,20 @@ async def cmd_promote(message: Message):
             args = message.text.split(maxsplit=2)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/promote (reply to message)\n/promote <user_id|@username> [title]")
+                await message.answer("Usage:\n/promote (reply to message)\n/promote <user_id|@username> [title]", reply_to_message_id=message.message_id)
                 return
             
             user_id, _ = parse_user_reference(args[1])
             title = args[2] if len(args) > 2 else "Admin"
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /promote <user_id|@username>")
+            await message.answer("❌ Could not identify user. Reply to a message or use /promote <user_id|@username>", reply_to_message_id=message.message_id)
+            return
+        
+        # Check if user is already admin
+        status_check = await check_user_current_status(user_id, message.chat.id, api_client, "promote", message.from_user.id)
+        if status_check != "ok":
+            await send_and_delete(message, f"⚠️ {status_check}", parse_mode=ParseMode.HTML, delay=5)
             return
         
         logger.info(f"BOT DEBUG: Promoting user_id={user_id} with title={title}")
@@ -1766,15 +2711,15 @@ async def cmd_promote(message: Message):
         result = await api_client.execute_action(action_data)
         
         if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None, reply_to_message_id=message.message_id)
             await log_command_execution(message, "promote", success=False, result=result.get("error"), args=message.text)
         else:
-            await message.answer(f"✅ User {user_id} has been promoted to {title}")
+            await message.answer(f"✅ User {user_id} has been promoted to {title}", reply_to_message_id=message.message_id)
             await log_command_execution(message, "promote", success=True, result=None, args=message.text)
             
     except Exception as e:
         logger.error(f"Promote command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_demote(message: Message):
@@ -1798,13 +2743,19 @@ async def cmd_demote(message: Message):
             args = message.text.split(maxsplit=1)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/demote (reply to message)\n/demote <user_id|@username>")
+                await message.answer("Usage:\n/demote (reply to message)\n/demote <user_id|@username>", reply_to_message_id=message.message_id)
                 return
             
             user_id, _ = parse_user_reference(args[1])
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /demote <user_id|@username>")
+            await message.answer("❌ Could not identify user. Reply to a message or use /demote <user_id|@username>", reply_to_message_id=message.message_id)
+            return
+        
+        # Check if user is already a regular user (can't demote)
+        status_check = await check_user_current_status(user_id, message.chat.id, api_client, "demote", message.from_user.id)
+        if status_check != "ok":
+            await send_and_delete(message, f"⚠️ {status_check}", parse_mode=ParseMode.HTML, delay=5)
             return
         
         action_data = {
@@ -1817,15 +2768,15 @@ async def cmd_demote(message: Message):
         result = await api_client.execute_action(action_data)
         
         if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None, reply_to_message_id=message.message_id)
             await log_command_execution(message, "demote", success=False, result=result.get("error"), args=message.text)
         else:
-            await message.answer(f"✅ User {user_id} has been demoted")
+            await message.answer(f"✅ User {user_id} has been demoted", reply_to_message_id=message.message_id)
             await log_command_execution(message, "demote", success=True, result=None, args=message.text)
             
     except Exception as e:
         logger.error(f"Demote command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_lockdown(message: Message):
@@ -1915,14 +2866,20 @@ async def cmd_warn(message: Message):
             args = message.text.split(maxsplit=2)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/warn (reply to message)\n/warn <user_id|@username> [reason]")
+                await message.answer("Usage:\n/warn (reply to message)\n/warn <user_id|@username> [reason]", reply_to_message_id=message.message_id)
                 return
             
             user_id, _ = parse_user_reference(args[1])
             reason = args[2] if len(args) > 2 else "No reason"
         
         if not user_id:
-            await message.answer("❌ Could not identify user. Reply to a message or use /warn <user_id|@username>")
+            await message.answer("❌ Could not identify user. Reply to a message or use /warn <user_id|@username>", reply_to_message_id=message.message_id)
+            return
+        
+        # Check if user is already warned beyond warn limit
+        status_check = await check_user_current_status(user_id, message.chat.id, api_client, "warn", message.from_user.id)
+        if status_check != "ok":
+            await send_and_delete(message, f"⚠️ {status_check}", parse_mode=ParseMode.HTML, delay=5)
             return
         
         action_data = {
@@ -1936,15 +2893,15 @@ async def cmd_warn(message: Message):
         result = await api_client.execute_action(action_data)
         
         if result.get("error") is not None:
-            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None)
+            await message.answer(f"❌ Error: {escape_error_message(result['error'])}", parse_mode=None, reply_to_message_id=message.message_id)
             await log_command_execution(message, "warn", success=False, result=result.get("error"), args=message.text)
         else:
-            await message.answer(f"⚠️ User {user_id} warned - Reason: {reason}")
+            await message.answer(f"⚠️ User {user_id} warned - Reason: {reason}", reply_to_message_id=message.message_id)
             await log_command_execution(message, "warn", success=True, result=None, args=message.text)
             
     except Exception as e:
         logger.error(f"Warn command failed: {e}")
-        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None)
+        await message.answer(f"❌ Error: {escape_error_message(str(e))}", parse_mode=None, reply_to_message_id=message.message_id)
 
 
 async def cmd_restrict(message: Message):
@@ -1975,6 +2932,12 @@ async def cmd_restrict(message: Message):
         
         if not user_id:
             await message.answer("❌ Could not identify user. Reply to a message or use /restrict <user_id|@username>")
+            return
+        
+        # Prevent restricting the bot itself
+        bot_info = await bot.get_me()
+        if user_id == bot_info.id:
+            await send_and_delete(message, "❌ Cannot restrict the bot itself!", delay=5)
             return
         
         # Fetch current permission states
@@ -2030,21 +2993,16 @@ async def cmd_restrict(message: Message):
         ])
         
         text = (
-            f"� <b>PERMISSION TOGGLES</b>\n\n"
-            f"<b>User ID:</b> <code>{user_id}</code>\n"
-            f"<b>Group ID:</b> <code>{message.chat.id}</code>\n\n"
-            f"<b>Current State:</b>\n"
-            f"• 📝 Text: {'🔒 LOCKED' if text_locked else '🔓 UNLOCKED'}\n"
-            f"• 🎨 Stickers: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
-            f"• 🎬 GIFs: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
-            f"• 🎤 Voice: {'🔒 LOCKED' if voice_locked else '🔓 UNLOCKED'}\n\n"
-            f"<b>Click button to toggle permission (ON/OFF):</b>\n"
-            f"• Button shows the action it will perform\n"
-            f"• � Lock = Click to LOCK (turn OFF)\n"
-            f"• 🔒 Free = Click to FREE (turn ON)\n"
+            f"🔐 <b>PERMISSIONS</b>\n"
+            f"<b>User:</b> <code>{user_id}</code>\n\n"
+            f"<b>State:</b>\n"
+            f"📝 {'🔒' if text_locked else '🔓'} "
+            f"🎨 {'🔒' if stickers_locked else '🔓'} "
+            f"🎤 {'🔒' if voice_locked else '🔓'}\n\n"
+            f"<b>Click buttons to toggle</b>"
         )
         
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await send_message_with_reply(message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         await log_command_execution(message, "restrict", success=True, result="Permission toggles displayed", args=message.text)
             
     except Exception as e:
@@ -2064,10 +3022,21 @@ async def cmd_unrestrict(message: Message):
             return
         
         user_id = None
+        target_user = None
+        reply_text = ""
         
         # Check if replying to a message
         if message.reply_to_message:
             user_id = await get_user_id_from_reply(message)
+            # Get the replied user's info
+            if message.reply_to_message.from_user:
+                target_user = message.reply_to_message.from_user
+                # Get the replied message text/caption
+                reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+                if reply_text:
+                    # Truncate if too long
+                    if len(reply_text) > 100:
+                        reply_text = reply_text[:97] + "..."
         else:
             # Direct command with user_id or username
             args = message.text.split(maxsplit=1)
@@ -2076,10 +3045,25 @@ async def cmd_unrestrict(message: Message):
                 await message.answer("Usage:\n/unrestrict (reply to message)\n/unrestrict <user_id|@username>")
                 return
             
-            user_id, _ = parse_user_reference(args[1])
+            user_id, username = parse_user_reference(args[1])
+            
+            # Try to get user info from chat
+            if user_id:
+                try:
+                    target_user = await bot.get_chat_member(message.chat.id, user_id)
+                    if target_user:
+                        target_user = target_user.user
+                except Exception:
+                    pass
         
         if not user_id:
             await message.answer("❌ Could not identify user. Reply to a message or use /unrestrict <user_id|@username>")
+            return
+        
+        # Prevent unrestricting the bot itself (same check for consistency)
+        bot_info = await bot.get_me()
+        if user_id == bot_info.id:
+            await send_and_delete(message, "❌ Cannot modify permissions for the bot itself!", delay=5)
             return
         
         # Fetch current permission states
@@ -2103,52 +3087,57 @@ async def cmd_unrestrict(message: Message):
             text_locked = stickers_locked = voice_locked = False
         
         # Show toggle buttons based on current state
+        # Show toggle buttons in 2x2 grid with status indicators
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"📝 Text: {'� Lock' if text_locked else '🔒 Free'}",
+                    text=f"📝 Text {'✅' if not text_locked else '❌'}",
                     callback_data=f"toggle_perm_text_{user_id}_{message.chat.id}"
                 ),
                 InlineKeyboardButton(
-                    text=f"🎨 Stickers: {'� Lock' if stickers_locked else '🔒 Free'}",
+                    text=f"🎨 Stickers {'✅' if not stickers_locked else '❌'}",
                     callback_data=f"toggle_perm_stickers_{user_id}_{message.chat.id}"
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"🎬 GIFs: {'� Lock' if stickers_locked else '🔒 Free'}",
-                    callback_data=f"toggle_perm_gifs_{user_id}_{message.chat.id}"
+                    text=f"🎤 Voice {'✅' if not voice_locked else '❌'}",
+                    callback_data=f"toggle_perm_voice_{user_id}_{message.chat.id}"
                 ),
                 InlineKeyboardButton(
-                    text=f"🎤 Voice: {'� Lock' if voice_locked else '🔒 Free'}",
-                    callback_data=f"toggle_perm_voice_{user_id}_{message.chat.id}"
+                    text=f"📁 All {'✅' if not (text_locked or stickers_locked or voice_locked) else '❌'}",
+                    callback_data=f"toggle_perm_all_{user_id}_{message.chat.id}"
                 ),
             ],
             [
-                InlineKeyboardButton(
-                    text="🔄 Toggle All",
-                    callback_data=f"toggle_perm_all_{user_id}_{message.chat.id}"
-                ),
-                InlineKeyboardButton(text="❌ Cancel", callback_data=f"toggle_cancel_{user_id}_{message.chat.id}"),
+                InlineKeyboardButton(text="❌ Done", callback_data=f"toggle_cancel_{user_id}_{message.chat.id}"),
             ]
         ])
+
         
-        text = (
-            f"� <b>PERMISSION TOGGLES</b>\n\n"
-            f"<b>User ID:</b> <code>{user_id}</code>\n"
-            f"<b>Group ID:</b> <code>{message.chat.id}</code>\n\n"
-            f"<b>Current State:</b>\n"
-            f"• 📝 Text: {'🔒 LOCKED' if text_locked else '🔓 UNLOCKED'}\n"
-            f"• 🎨 Stickers: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
-            f"• 🎬 GIFs: {'🔒 LOCKED' if stickers_locked else '🔓 UNLOCKED'}\n"
-            f"• 🎤 Voice: {'🔒 LOCKED' if voice_locked else '🔓 UNLOCKED'}\n\n"
-            f"<b>Click button to toggle permission (ON/OFF):</b>\n"
-            f"• Button shows the action it will perform\n"
-            f"• 🔓 Lock = Click to LOCK (turn OFF)\n"
-            f"• 🔒 Free = Click to FREE (turn ON)\n"
-        )
+        # Build user display with clickable link
+        user_display = f"<code>{user_id}</code>"
+        if target_user:
+            if target_user.username:
+                user_display = f"<a href='tg://user?id={user_id}'>@{target_user.username}</a>"
+            elif target_user.first_name:
+                user_display = f"<a href='tg://user?id={user_id}'>{target_user.first_name}</a>"
         
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        # Build message showing user info and permission states
+        text = f"🔐 <b>USER PERMISSIONS</b>\n\n"
+        text += f"<b>Target:</b> {user_display}\n"
+        
+        if reply_text:
+            # Show the quoted message if available
+            text += f"<b>Message:</b> \"{reply_text}\"\n"
+        
+        text += f"\n<b>Current Restrictions:</b>\n"
+        text += f"📝 Text: {'❌ LOCKED' if text_locked else '✅ Allowed'}\n"
+        text += f"🎨 Stickers: {'❌ LOCKED' if stickers_locked else '✅ Allowed'}\n"
+        text += f"🎤 Voice: {'❌ LOCKED' if voice_locked else '✅ Allowed'}\n\n"
+        text += "<b>Tap any button to toggle permission</b>"
+        
+        await send_message_with_reply(message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         await log_command_execution(message, "unrestrict", success=True, result="Permission toggles displayed", args=message.text)
             
     except Exception as e:
@@ -2158,17 +3147,27 @@ async def cmd_unrestrict(message: Message):
 
 
 async def cmd_free(message: Message):
-    """Handle /free command - Enhanced permission & content-type management
+    """Handle /free command - Advanced content & behavior management system
     
-    Shows detailed permission toggles for managing specific content types:
-    - Text messages (on/off)
-    - Stickers (on/off)
-    - GIFs (on/off)
-    - Media (photos, videos, documents)
-    - Voice messages (on/off)
-    - Links/URLs (on/off)
+    Shows comprehensive toggles for:
     
-    Also shows night mode status and exemption status
+    📋 CONTENT RESTRICTIONS:
+    - Text messages (text)
+    - Stickers/Emojis (stickers)
+    - GIFs/Animations (gifs)
+    - Media (photos, videos, documents, voice notes, video notes)
+    - Links/Web previews (links)
+    
+    🚨 BEHAVIOR FILTERS:
+    - Floods: Detects & auto-deletes rapid message spam (>4 msgs/5sec)
+    - Media: Auto-deletes restricted media types in real-time
+    - Spam: Detects excessive links, mentions, hashtags
+    - Checks: Requires new members to pass verification
+    
+    🌙 SILENCE MODE (Night Mode):
+    - Activates time-based muting (auto-delete all non-text messages)
+    - Exempts trusted users/roles
+    - Schedule enforcement
     
     Usage: /free (reply to message) or /free <user_id|@username>
     """
@@ -2189,7 +3188,13 @@ async def cmd_free(message: Message):
             args = message.text.split(maxsplit=1)
             
             if len(args) < 2:
-                await message.answer("Usage:\n/free (reply to message)\n/free <user_id|@username>")
+                await message.answer(
+                    "<b>Usage:</b>\n"
+                    "/free (reply to message)\n"
+                    "/free &lt;user_id|@username&gt;\n\n"
+                    "Example: /free @john or /free 123456789",
+                    parse_mode=ParseMode.HTML
+                )
                 return
             
             user_id, _ = parse_user_reference(args[1])
@@ -2198,7 +3203,7 @@ async def cmd_free(message: Message):
             await message.answer("❌ Could not identify user. Reply to a message or use /free <user_id|@username>")
             return
         
-        # Fetch current permission states
+        # Fetch current permission states from API
         text_allowed = True
         stickers_allowed = True
         gifs_allowed = True
@@ -2219,131 +3224,144 @@ async def cmd_free(message: Message):
                     stickers_allowed = bool(perms.get("can_send_other_messages", True))
                     gifs_allowed = bool(perms.get("can_send_other_messages", True))
                     media_allowed = bool(perms.get("can_send_media_messages", True))
-                    voice_allowed = bool(perms.get("can_send_voice_notes", True))
+                    voice_allowed = bool(perms.get("can_send_audios", True))
                     links_allowed = bool(perms.get("can_add_web_page_previews", True))
         except Exception as e:
             logger.warning(f"Could not fetch permissions: {e}, assuming all allowed")
         
-        # Check night mode exemption status
-        is_exempt = False
-        is_exempt_role = False
+        # Fetch group policy settings (floods, spam, checks, silence)
+        group_policies = {}
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{message.chat.id}/policies",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    group_policies = resp.json().get("data", {})
+        except Exception as e:
+            logger.debug(f"Could not fetch group policies: {e}")
+        
+        # Check night mode exemption and status
+        is_exempt = False
+        is_exempt_role = False
+        night_mode_active = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Check exemption
+                resp1 = await client.get(
                     f"{api_client.base_url}/api/v2/groups/{message.chat.id}/night-mode/check/{user_id}/text",
                     headers={"Authorization": f"Bearer {api_client.api_key}"},
                     timeout=5
                 )
-                if resp.status_code == 200:
-                    nm_data = resp.json()
+                if resp1.status_code == 200:
+                    nm_data = resp1.json()
                     is_exempt = bool(nm_data.get("is_exempt", False))
                     is_exempt_role = nm_data.get("exempt_type") == "role" if "exempt_type" in nm_data else False
-        except Exception as e:
-            logger.debug(f"Could not check night mode exemption: {e}")
-        
-        # Check night mode status
-        night_mode_active = False
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
+                
+                # Check night mode status
+                resp2 = await client.get(
                     f"{api_client.base_url}/api/v2/groups/{message.chat.id}/night-mode/status",
                     headers={"Authorization": f"Bearer {api_client.api_key}"},
                     timeout=5
                 )
-                if resp.status_code == 200:
-                    nm_status = resp.json()
+                if resp2.status_code == 200:
+                    nm_status = resp2.json()
                     night_mode_active = bool(nm_status.get("is_active", False))
         except Exception as e:
-            logger.debug(f"Could not check night mode status: {e}")
+            logger.debug(f"Could not check night mode: {e}")
         
-        # Build comprehensive permission toggles keyboard
+        # Extract policy settings with defaults
+        floods_enabled = group_policies.get("floods_enabled", False)
+        spam_enabled = group_policies.get("spam_enabled", False)
+        checks_enabled = group_policies.get("checks_enabled", False)
+        silence_mode = group_policies.get("silence_mode", False)
+        
+        # Build COLLAPSIBLE keyboard with section headers
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            # Row 1: Text & Stickers
+            # ===== SECTION HEADERS (Expandable) =====
+            [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{message.chat.id}")],
+            [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{message.chat.id}")],
+            [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{message.chat.id}")],
+            [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{message.chat.id}")],
+            
+            # ===== CONTENT PERMISSIONS (Expanded by default) =====
             [
                 InlineKeyboardButton(
-                    text=f"📝 Text: {'✅ ON' if text_allowed else '❌ OFF'}",
-                    callback_data=f"toggle_perm_text_{user_id}_{message.chat.id}"
+                    text=f"📝 Text {'✅' if text_allowed else '❌'}",
+                    callback_data=f"free_toggle_text_{user_id}_{message.chat.id}"
                 ),
                 InlineKeyboardButton(
-                    text=f"🎨 Stickers: {'✅ ON' if stickers_allowed else '❌ OFF'}",
-                    callback_data=f"toggle_perm_stickers_{user_id}_{message.chat.id}"
+                    text=f"🎨 Stickers {'✅' if stickers_allowed else '❌'}",
+                    callback_data=f"free_toggle_stickers_{user_id}_{message.chat.id}"
                 ),
             ],
-            # Row 2: GIFs & Media
             [
                 InlineKeyboardButton(
-                    text=f"🎬 GIFs: {'✅ ON' if gifs_allowed else '❌ OFF'}",
-                    callback_data=f"toggle_perm_gifs_{user_id}_{message.chat.id}"
+                    text=f"� GIFs {'✅' if gifs_allowed else '❌'}",
+                    callback_data=f"free_toggle_gifs_{user_id}_{message.chat.id}"
                 ),
                 InlineKeyboardButton(
-                    text=f"📸 Media: {'✅ ON' if media_allowed else '❌ OFF'}",
-                    callback_data=f"toggle_perm_media_{user_id}_{message.chat.id}"
+                    text=f"📸 Media {'✅' if media_allowed else '❌'}",
+                    callback_data=f"free_toggle_media_{user_id}_{message.chat.id}"
                 ),
             ],
-            # Row 3: Voice & Links
             [
                 InlineKeyboardButton(
-                    text=f"🎤 Voice: {'✅ ON' if voice_allowed else '❌ OFF'}",
-                    callback_data=f"toggle_perm_voice_{user_id}_{message.chat.id}"
+                    text=f"� Voice {'✅' if voice_allowed else '❌'}",
+                    callback_data=f"free_toggle_voice_{user_id}_{message.chat.id}"
                 ),
                 InlineKeyboardButton(
-                    text=f"🔗 Links: {'✅ ON' if links_allowed else '❌ OFF'}",
-                    callback_data=f"toggle_perm_links_{user_id}_{message.chat.id}"
+                    text=f"🔗 Links {'✅' if links_allowed else '❌'}",
+                    callback_data=f"free_toggle_links_{user_id}_{message.chat.id}"
                 ),
             ],
-            # Row 4: Action buttons
+            
+            # ===== ACTION BUTTONS =====
             [
                 InlineKeyboardButton(
-                    text="🔄 Toggle All",
-                    callback_data=f"toggle_perm_all_{user_id}_{message.chat.id}"
+                    text="↻ Reset All",
+                    callback_data=f"free_reset_all_{user_id}_{message.chat.id}"
                 ),
                 InlineKeyboardButton(
-                    text="❌ Cancel",
-                    callback_data=f"toggle_cancel_{user_id}_{message.chat.id}"
+                    text="✖ Close",
+                    callback_data=f"free_close_{user_id}_{message.chat.id}"
                 ),
             ]
         ])
         
-        # Build detailed status message
-        exemption_status = ""
-        if is_exempt:
-            if is_exempt_role:
-                exemption_status = "  🎖️  <i>Exempt by role</i>\n"
-            else:
-                exemption_status = "  ⭐ <i>Personally exempt</i>\n"
+        # Get user mention link
+        user_mention = await get_user_mention(user_id, message.chat.id)
         
-        night_mode_indicator = ""
-        if night_mode_active:
-            night_mode_indicator = f"\n🌙 <b>Night Mode Status:</b> <code>ACTIVE</code> {exemption_status}"
-        
+        # Build SHORT message
         text = (
-            f"╔═══════════════════════════════════════╗\n"
-            f"║ 🔓 <b>CONTENT PERMISSIONS</b>          ║\n"
-            f"╚═══════════════════════════════════════╝\n\n"
-            f"<b>Target User:</b> <code>{user_id}</code>\n"
-            f"<b>Group:</b> <code>{message.chat.id}</code>\n\n"
-            f"<b>📊 Permission State:</b>\n"
-            f"  📝 Text: <code>{'ALLOWED ✅' if text_allowed else 'BLOCKED ❌'}</code>\n"
-            f"  🎨 Stickers: <code>{'ALLOWED ✅' if stickers_allowed else 'BLOCKED ❌'}</code>\n"
-            f"  🎬 GIFs: <code>{'ALLOWED ✅' if gifs_allowed else 'BLOCKED ❌'}</code>\n"
-            f"  📸 Media: <code>{'ALLOWED ✅' if media_allowed else 'BLOCKED ❌'}</code>\n"
-            f"  🎤 Voice: <code>{'ALLOWED ✅' if voice_allowed else 'BLOCKED ❌'}</code>\n"
-            f"  🔗 Links: <code>{'ALLOWED ✅' if links_allowed else 'BLOCKED ❌'}</code>\n"
-            f"{night_mode_indicator}"
-            f"\n<b>💡 How to Use:</b>\n"
-            f"  • Click any button to toggle that content type\n"
-            f"  • ✅ ON = User can send this type\n"
-            f"  • ❌ OFF = User cannot send this type\n"
-            f"  • 🔄 Toggle All = Quick reverse all perms\n"
+            f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+            f"<b>👤 Member:</b> {user_mention}\n"
+            f"<b>👥 Group:</b> <code>{message.chat.id}</code>\n\n"
+            f"<b>📋 CONTENT PERMISSIONS:</b>\n"
+            f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+            f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+            f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+            f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+            f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+            f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}\n\n"
+            f"<i>Click sections below to expand filters & analysis</i>"
         )
         
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        await log_command_execution(message, "free", success=True, result="Enhanced permission toggles displayed", args=message.text)
+        await send_message_with_reply(message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await log_command_execution(
+            message, "free", success=True, 
+            result="Advanced content & behavior manager displayed", 
+            args=message.text
+        )
             
     except Exception as e:
         logger.error(f"Free command failed: {e}")
-        await send_and_delete(message, f"❌ Error: {escape_error_message(str(e))}", 
-                             parse_mode=ParseMode.HTML, delay=5)
+        await send_and_delete(
+            message, f"❌ Error: {escape_error_message(str(e))}", 
+            parse_mode=ParseMode.HTML, delay=5
+        )
 
 async def cmd_purge(message: Message):
     """Handle /purge command - Delete multiple messages from user
@@ -2920,6 +3938,7 @@ async def cmd_send(message: Message):
     Basic Modes:
     ⚡ /send <text>                    - Send to group
     ⚡ /send (reply)                   - Send in thread
+    ⚡ /send (media with caption)      - Forward media with optional caption
     
     Advanced Modes:
     🔥 /send pin <text>                - Send & pin message
@@ -2935,7 +3954,7 @@ async def cmd_send(message: Message):
     ⚡⚡ /send silent <text>            - Send without notification
     ⚡⚡ /send reactive <text> <reaction> - Send with reaction
     
-    Features: Scheduling, repeating, notifications, silent mode, reactions
+    Features: Scheduling, repeating, notifications, silent mode, reactions, MEDIA SUPPORT
     """
     try:
         # Permission check: ensure caller is admin
@@ -2947,6 +3966,227 @@ async def cmd_send(message: Message):
                 delay=5
             )
             return
+        
+        # Handle case where message has media attached (e.g., photo with /send caption text)
+        # Check for media first before checking message.text
+        if message.photo or message.video or message.document or message.audio or message.voice or message.animation:
+            # If message has media attached, extract caption from command text or use original
+            caption = None
+            media_type = None
+            media_file_id = None
+            
+            # Try to extract caption text from the command (e.g., /send hello -> hello)
+            command_caption = None
+            if message.caption_entities:
+                # If there are entities (like /send being a command), extract text after command
+                for entity in message.caption_entities:
+                    if entity.type == "bot_command":
+                        # Extract text after the command
+                        entity_end = entity.offset + entity.length
+                        # Only use extracted text if there's actual text after the command
+                        if entity_end < len(message.caption):
+                            remaining_text = message.caption[entity_end:].strip()
+                            if remaining_text:  # Only if there's actual text
+                                command_caption = remaining_text
+                        break
+            
+            # Use command caption if available (don't use original caption if it starts with /send)
+            if command_caption:
+                caption = command_caption
+            elif message.caption and not message.caption.strip().startswith('/send'):
+                # Use original caption only if it doesn't start with /send
+                caption = message.caption
+            else:
+                # No caption to use
+                caption = None
+            
+            # Detect media type from current message
+            if message.photo:
+                media_type = "photo"
+                media_file_id = message.photo[-1].file_id
+            elif message.video:
+                media_type = "video"
+                media_file_id = message.video.file_id
+            elif message.document:
+                media_type = "document"
+                media_file_id = message.document.file_id
+            elif message.audio:
+                media_type = "audio"
+                media_file_id = message.audio.file_id
+            elif message.voice:
+                media_type = "voice"
+                media_file_id = message.voice.file_id
+            elif message.animation:
+                media_type = "animation"
+                media_file_id = message.animation.file_id
+            
+            # If we found media in the message itself
+            if media_type and media_file_id:
+                try:
+                    await message.delete()
+                except:
+                    pass
+                
+                try:
+                    # Send media based on type
+                    send_kwargs = {
+                        "chat_id": message.chat.id,
+                    }
+                    
+                    # Add caption if exists
+                    if caption:
+                        send_kwargs["caption"] = caption
+                        send_kwargs["parse_mode"] = ParseMode.HTML
+                    
+                    if media_type == "photo":
+                        await bot.send_photo(photo=media_file_id, **send_kwargs)
+                    elif media_type == "video":
+                        await bot.send_video(video=media_file_id, **send_kwargs)
+                    elif media_type == "document":
+                        await bot.send_document(document=media_file_id, **send_kwargs)
+                    elif media_type == "audio":
+                        await bot.send_audio(audio=media_file_id, **send_kwargs)
+                    elif media_type == "voice":
+                        await bot.send_voice(voice=media_file_id, **send_kwargs)
+                    elif media_type == "animation":
+                        await bot.send_animation(animation=media_file_id, **send_kwargs)
+                    
+                    logger.info(f"Media sent: {media_type} with caption: {bool(caption)}")
+                    await log_command_execution(message, "send", True, f"media ({media_type})")
+                    return
+                except Exception as e:
+                    logger.error(f"Error sending media: {e}")
+                    await send_and_delete(message, f"❌ Error sending media: {str(e)[:50]}", delay=5)
+                    return
+            
+            # No media in message and no text
+            if not message.text:
+                await send_and_delete(
+                    message,
+                    "❌ Please provide text or media with /send",
+                    parse_mode=ParseMode.HTML,
+                    delay=5
+                )
+                return
+        
+        # If we reach here, message.text must exist
+        if not message.text:
+            await send_and_delete(
+                message,
+                "❌ Please provide a message to send",
+                parse_mode=ParseMode.HTML,
+                delay=5
+            )
+            return
+        
+        # Check if message is JUST "/send" with no additional text (media reply case)
+        text_parts = message.text.split(maxsplit=1) if message.text else []
+        has_additional_text = len(text_parts) > 1
+        
+        # Handle case where user replies to media with just /send
+        if not has_additional_text and message.reply_to_message:
+            reply_msg = message.reply_to_message
+            caption = None
+            media_type = None
+            media_file_id = None
+            
+            # Detect media type
+            if reply_msg.photo:
+                media_type = "photo"
+                media_file_id = reply_msg.photo[-1].file_id  # Get highest quality
+                caption = reply_msg.caption
+            elif reply_msg.video:
+                media_type = "video"
+                media_file_id = reply_msg.video.file_id
+                caption = reply_msg.caption
+            elif reply_msg.document:
+                media_type = "document"
+                media_file_id = reply_msg.document.file_id
+                caption = reply_msg.caption
+            elif reply_msg.audio:
+                media_type = "audio"
+                media_file_id = reply_msg.audio.file_id
+                caption = reply_msg.caption
+            elif reply_msg.voice:
+                media_type = "voice"
+                media_file_id = reply_msg.voice.file_id
+                caption = reply_msg.caption
+            elif reply_msg.animation:
+                media_type = "animation"
+                media_file_id = reply_msg.animation.file_id
+                caption = reply_msg.caption
+            
+            if media_type and media_file_id:
+                try:
+                    await message.delete()
+                except:
+                    pass
+                
+                try:
+                    # Send media based on type - caption is optional
+                    send_kwargs = {
+                        "chat_id": message.chat.id,
+                    }
+                    
+                    # Only add caption and parse_mode if caption exists
+                    if caption:
+                        send_kwargs["caption"] = caption
+                        send_kwargs["parse_mode"] = ParseMode.HTML
+                    
+                    if media_type == "photo":
+                        await bot.send_photo(photo=media_file_id, **send_kwargs)
+                    elif media_type == "video":
+                        await bot.send_video(video=media_file_id, **send_kwargs)
+                    elif media_type == "document":
+                        await bot.send_document(document=media_file_id, **send_kwargs)
+                    elif media_type == "audio":
+                        await bot.send_audio(audio=media_file_id, **send_kwargs)
+                    elif media_type == "voice":
+                        await bot.send_voice(voice=media_file_id, **send_kwargs)
+                    elif media_type == "animation":
+                        await bot.send_animation(animation=media_file_id, **send_kwargs)
+                    
+                    logger.info(f"Media sent: {media_type} with caption: {bool(caption)}")
+                    await log_command_execution(message, "send", True, f"media ({media_type})")
+                    return
+                except Exception as e:
+                    logger.error(f"Error sending media: {e}")
+                    await send_and_delete(message, f"❌ Error sending media: {str(e)[:50]}", delay=5)
+                    return
+            
+            # Reply exists but no media found
+            if message.reply_to_message and not media_type:
+                # Check if reply has text to forward
+                if message.reply_to_message.text:
+                    message_text = message.reply_to_message.text
+                    reply_to_id = message.reply_to_message.message_id
+                    try:
+                        await message.delete()
+                    except:
+                        pass
+                    try:
+                        await bot.send_message(
+                            message.chat.id,
+                            message_text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                            reply_to_message_id=reply_to_id
+                        )
+                        await log_command_execution(message, "send", True, "text from reply")
+                        return
+                    except Exception as e:
+                        logger.error(f"Error sending reply text: {e}")
+                        await send_and_delete(message, f"❌ Error: {str(e)[:50]}", delay=5)
+                        return
+                else:
+                    # Reply with no text or media
+                    await send_and_delete(
+                        message,
+                        "❌ Reply message has no text or media to forward",
+                        parse_mode=ParseMode.HTML,
+                        delay=5
+                    )
+                    return
         
         args = message.text.split()
         
@@ -4456,6 +5696,11 @@ async def handle_message(message: Message):
                         logger.warning(f"🌙 User {user_id} blocked by night mode: {reason}")
                         
                         try:
+                            await message.reply(
+                                f"🌙 <b>Message Deleted</b>\n\n"
+                                f"Your {content_type} message was deleted because <b>night mode is active</b> and this content type is restricted during night mode.",
+                                parse_mode=ParseMode.HTML
+                            )
                             await message.delete()
                             logger.info(f"✅ Night mode: Auto-deleted {content_type} message from {user_id}")
                         except Exception as e:
@@ -4480,23 +5725,72 @@ async def handle_message(message: Message):
                         result = resp.json()
                         if result.get("data", {}).get("is_restricted"):
                             logger.warning(f"⛔ User {user_id} restricted from TEXT. Auto-deleting message.")
-                            await message.delete()
+                            try:
+                                await message.reply(
+                                    "🚫 <b>Message Deleted</b>\n\n"
+                                    "Your text message was deleted because <b>text messages are currently locked</b> for you in this group.",
+                                    parse_mode=ParseMode.HTML
+                                )
+                                await message.delete()
+                            except Exception as e:
+                                logger.warning(f"Could not delete/reply to text message: {e}")
                             return
                 
-                # Check sticker/GIF restriction
+                # Check sticker/GIF restriction with AUTO-DELETE (no Telegram restriction)
                 if message.sticker or message.animation or message.video_note:
-                    resp = await client.get(
-                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/is-restricted",
-                        params={"permission_type": "stickers"},
-                        headers={"Authorization": f"Bearer {api_client.api_key}"},
-                        timeout=5
-                    )
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        if result.get("data", {}).get("is_restricted"):
-                            logger.warning(f"⛔ User {user_id} restricted from STICKERS/GIFs. Auto-deleting message.")
-                            await message.delete()
-                            return
+                    try:
+                        # Get full permission state
+                        async with httpx.AsyncClient(timeout=5.0) as client:
+                            perms_resp = await client.get(
+                                f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                                headers={"Authorization": f"Bearer {api_client.api_key}"},
+                                timeout=5
+                            )
+                        
+                        if perms_resp.status_code == 200:
+                            perms = perms_resp.json().get("data", {})
+                            # Both stickers and GIFs use can_send_other_messages permission
+                            stickers_allowed = bool(perms.get("can_send_other_messages", True))
+                            gifs_allowed = bool(perms.get("can_send_other_messages", True))
+                            
+                            logger.info(f"📊 Stickers/GIFs permission state: can_send_other_messages={stickers_allowed}")
+                            
+                            is_sticker = message.sticker is not None
+                            is_gif = message.animation is not None or message.video_note is not None
+                            
+                            # AUTO-DELETE for stickers if permission is OFF
+                            if is_sticker and not stickers_allowed:
+                                logger.warning(f"⛔ User {user_id} sending STICKER but stickers are LOCKED (OFF). Auto-deleting.")
+                                try:
+                                    await message.reply(
+                                        "🚫 <b>Sticker Deleted</b>\n\n"
+                                        "Your sticker was deleted because <b>stickers are currently locked</b> for you in this group.",
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                    await message.delete()
+                                    logger.info(f"✅ Auto-deleted sticker from {user_id}")
+                                except Exception as del_err:
+                                    logger.warning(f"Could not delete sticker: {del_err}")
+                                return
+                            
+                            # AUTO-DELETE for GIFs if permission is OFF
+                            if is_gif and not gifs_allowed:
+                                logger.warning(f"⛔ User {user_id} sending GIF but GIFs are LOCKED (OFF). Auto-deleting.")
+                                try:
+                                    await message.reply(
+                                        "🚫 <b>GIF Deleted</b>\n\n"
+                                        "Your GIF was deleted because <b>GIFs are currently locked</b> for you in this group.",
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                    await message.delete()
+                                    logger.info(f"✅ Auto-deleted GIF from {user_id}")
+                                except Exception as del_err:
+                                    logger.warning(f"Could not delete GIF: {del_err}")
+                                return
+                    
+                    except Exception as e:
+                        logger.warning(f"Could not check sticker/GIF permissions: {e}")
+                        # Continue anyway if check fails
                 
                 # Check voice message restriction
                 if message.voice or message.audio:
@@ -4621,123 +5915,177 @@ async def handle_edit_template_callback(callback_query: CallbackQuery, data: str
 
 
 async def handle_permission_toggle_callback(callback_query: CallbackQuery, data: str):
-    """Handle unified permission toggle callbacks (toggle_perm_*_user_id_group_id)
+    """Handle unified permission toggle callbacks - works with API V2 + database, no Telegram API calls
     Automatically determines whether to lock or unlock based on current state
+    AFTER TOGGLING: Refreshes the menu to show new states instead of closing
     """
+    logger.info(f"🔄 Permission toggle callback started: data={data}")
     try:
         # Parse callback data: toggle_perm_{type}_{user_id}_{group_id}
         parts = data.split("_")
         if len(parts) < 4:
+            logger.warning(f"Invalid callback parts: {parts}")
             await callback_query.answer("Invalid callback data", show_alert=True)
             return
         
-        perm_type = parts[2]  # text, stickers, gifs, voice, all
+        perm_type = "_".join(parts[2:-2]) if len(parts) > 4 else parts[2]  # Handle types with underscores
         try:
-            user_id = int(parts[3])
-            group_id = int(parts[4])
-        except (ValueError, IndexError):
+            user_id = int(parts[-2])
+            group_id = int(parts[-1])
+        except (ValueError, IndexError) as parse_error:
+            logger.warning(f"Failed to parse IDs: {parse_error}")
             await callback_query.answer("Invalid user or group ID", show_alert=True)
             return
         
+        logger.info(f"Parsed: perm_type={perm_type}, user_id={user_id}, group_id={group_id}")
+        
         # Check admin permission
-        if not await check_is_admin(callback_query.from_user.id, group_id):
+        is_admin = await check_is_admin(callback_query.from_user.id, group_id)
+        logger.info(f"Admin check: {is_admin}")
+        if not is_admin:
             await callback_query.answer("❌ You need admin permissions", show_alert=True)
             return
         
-        # Fetch current permission state to determine action
-        is_currently_locked = False
+        # Determine action: toggle restrict/unrestrict via API V2
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
-                    headers={"Authorization": f"Bearer {api_client.api_key}"},
-                    timeout=5
-                )
-                if resp.status_code == 200:
-                    perms = resp.json().get("data", {})
-                    perm_mapping = {
-                        "text": "can_send_messages",
-                        "stickers": "can_send_other_messages",
-                        "gifs": "can_send_other_messages",
-                        "voice": "can_send_audios"
-                    }
-                    
-                    if perm_type == "all":
-                        # Check if ANY permission is unlocked (not all locked)
-                        is_currently_locked = not (
-                            perms.get("can_send_messages", True) or
-                            perms.get("can_send_other_messages", True) or
-                            perms.get("can_send_audios", True)
-                        )
-                    else:
-                        api_perm = perm_mapping.get(perm_type)
-                        is_currently_locked = not perms.get(api_perm, True)
-        except Exception as e:
-            logger.warning(f"Could not fetch permissions: {e}")
-            is_currently_locked = False
-        
-        # Determine action: if locked, unlock (unrestrict); if unlocked, lock (restrict)
-        action_type = "unrestrict" if is_currently_locked else "restrict"
-        
-        # Map permission type to API parameter
-        perm_mapping = {
-            "text": "send_messages",
-            "stickers": "send_other_messages",
-            "gifs": "send_other_messages",
-            "voice": "send_audios"
-        }
-        
-        # Execute toggle via API
-        if perm_type == "all":
-            action_data = {
-                "action_type": action_type,
-                "group_id": group_id,
-                "user_id": user_id,
-                "toggle_all": True,
-                "initiated_by": callback_query.from_user.id
+            # Parse permission type to API parameter
+            perm_mapping = {
+                "text": "send_messages",
+                "stickers": "send_other_messages",
+                "gifs": "send_other_messages",
+                "voice": "send_audios"
             }
-        else:
-            api_perm = perm_mapping.get(perm_type)
-            if not api_perm:
-                await callback_query.answer(f"Unknown permission type: {perm_type}", show_alert=True)
-                return
             
-            action_data = {
-                "action_type": action_type,
-                "group_id": group_id,
-                "user_id": user_id,
-                "metadata": {"permission_type": api_perm},
-                "initiated_by": callback_query.from_user.id
-            }
-        
-        result = await api_client.execute_action(action_data)
-        
-        if result.get("error"):
-            error_msg = escape_error_message(result.get("error"))
-            await callback_query.answer(f"❌ Error: {error_msg}", show_alert=True)
-        else:
-            # Show success message
+            # Prepare action data for API
             if perm_type == "all":
-                success_msg = f"✅ All permissions {'locked' if action_type == 'restrict' else 'unlocked'}"
+                # Toggle all permissions at once
+                action_data = {
+                    "user_id": user_id,
+                    "toggle_all": True
+                }
             else:
-                perm_name = perm_type.capitalize()
-                action_word = "locked" if action_type == "restrict" else "unlocked"
-                success_msg = f"✅ {perm_name} {action_word}"
+                # Toggle specific permission
+                api_perm = perm_mapping.get(perm_type)
+                if not api_perm:
+                    logger.warning(f"Unknown permission type: {perm_type}")
+                    await callback_query.answer(f"Unknown permission type", show_alert=True)
+                    return
+                
+                action_data = {
+                    "user_id": user_id,
+                    "metadata": {"permission_type": api_perm}
+                }
             
-            await callback_query.answer(success_msg, show_alert=False)
+            logger.info(f"Action data prepared: {action_data}")
             
-            # Log the action
-            await log_command_execution(
-                callback_query.message,
-                action_type,
-                success=True,
-                result=f"Toggled {perm_type} ({action_type})",
-                args=f"User {user_id}"
-            )
+            # Call API v2 to toggle - this will handle both restrict and unrestrict internally
+            try:
+                logger.info(f"Calling toggle API for group {group_id}...")
+                result = await api_client.post(f"/groups/{group_id}/enforcement/toggle-permission", action_data)
+                logger.info(f"API response: {result}")
+                api_success = isinstance(result, dict) and result.get("success") is True
+                logger.info(f"Toggle permission result - success: {api_success}, result: {result}")
+            except Exception as call_error:
+                logger.error(f"API call failed: {call_error}", exc_info=True)
+                api_success = False
+            
+            # Show notification based on result
+            if api_success:
+                if perm_type == "all":
+                    success_msg = "✅ All toggled"
+                else:
+                    perm_name = perm_type.capitalize()
+                    success_msg = f"✅ {perm_name}"
+                logger.info(f"Sending success answer: {success_msg}")
+                await callback_query.answer(success_msg, show_alert=False)
+                
+                # Get updated permission states from the API response itself
+                if api_success and isinstance(result, dict) and "data" in result:
+                    # Use the returned data directly - it's the freshest state
+                    perms = result.get("data", {}).get("permissions", {})
+                    logger.info(f"Using API response permissions: {perms}")
+                else:
+                    # Fallback: Fetch from API endpoint
+                    logger.info(f"Fetching updated permissions for user {user_id}...")
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as client:
+                            resp = await client.get(
+                                f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                                headers={"Authorization": f"Bearer {api_client.api_key}"},
+                                timeout=5
+                            )
+                            if resp.status_code == 200:
+                                perms = resp.json().get("data", {})
+                                logger.info(f"Fetched permissions: {perms}")
+                            else:
+                                logger.warning(f"Could not fetch updated perms (status {resp.status_code})")
+                                perms = {}
+                    except Exception as e:
+                        logger.warning(f"Could not fetch updated permissions: {e}")
+                        perms = {}
+                
+                # Determine lock states - FALSE means allowed, TRUE means locked
+                text_locked = not perms.get("can_send_messages", True)
+                stickers_locked = not perms.get("can_send_other_messages", True)
+                voice_locked = not perms.get("can_send_audios", True)
+                logger.info(f"State display: text_locked={text_locked}, stickers_locked={stickers_locked}, voice_locked={voice_locked}")
+                
+                # Refresh the menu with updated button states
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"📝 {'🔒' if text_locked else '✅'}",
+                            callback_data=f"toggle_perm_text_{user_id}_{group_id}"
+                        ),
+                        InlineKeyboardButton(
+                            text=f"🎨 {'🔒' if stickers_locked else '✅'}",
+                            callback_data=f"toggle_perm_stickers_{user_id}_{group_id}"
+                        ),
+                        InlineKeyboardButton(
+                            text=f"🎤 {'🔒' if voice_locked else '✅'}",
+                            callback_data=f"toggle_perm_voice_{user_id}_{group_id}"
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="🔄 Toggle All",
+                            callback_data=f"toggle_perm_all_{user_id}_{group_id}"
+                        ),
+                        InlineKeyboardButton(text="❌ Done", callback_data=f"toggle_cancel_{user_id}_{group_id}"),
+                    ]
+                ])
+                
+                updated_text = (
+                    f"� <b>PERMISSIONS</b>\n"
+                    f"<b>User:</b> <code>{user_id}</code>\n\n"
+                    f"✅ = Allowed | 🔒 = Locked\n\n"
+                    f"📝 {'🔒 Locked' if text_locked else '✅ Allowed'}\n"
+                    f"🎨 {'🔒 Locked' if stickers_locked else '✅ Allowed'}\n"
+                    f"🎤 {'🔒 Locked' if voice_locked else '✅ Allowed'}\n\n"
+                    f"<b>Tap to toggle</b>"
+                )
+                
+                # Edit the message to show updated states
+                try:
+                    await callback_query.message.edit_text(
+                        updated_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
+                    logger.info(f"✅ Menu refreshed with updated states")
+                except Exception as edit_error:
+                    logger.warning(f"Could not edit message: {edit_error}", exc_info=True)
+            else:
+                logger.warning(f"API call failed, sending error")
+                await callback_query.answer("❌ Action failed", show_alert=False)
+                
+        except Exception as api_error:
+            logger.error(f"Permission toggle error: {api_error}", exc_info=True)
+            await callback_query.answer("❌ Error", show_alert=False)
     
     except Exception as e:
-        logger.error(f"Permission toggle callback error: {e}")
-        await callback_query.answer(f"❌ Error: {escape_error_message(str(e))}", show_alert=True)
+        logger.error(f"Permission toggle callback error: {e}", exc_info=True)
+        await callback_query.answer("❌ Error", show_alert=False)
 
 
 async def handle_toggle_cancel_callback(callback_query: CallbackQuery, data: str):
@@ -4764,9 +6112,14 @@ async def handle_advanced_toggle(callback_query: CallbackQuery):
             await callback_query.answer("Invalid callback data", show_alert=True)
             return
         
-        action = parts[2]  # mute, ban, warn, restrict, lockdown, nightmode, promote, demote
-        user_id = int(parts[3])
-        group_id = int(parts[4])
+        action = parts[1]  # mute, ban, warn, restrict, lockdown, nightmode, promote, demote
+        # Get last 2 parts as user_id and group_id (handles negative group IDs)
+        try:
+            user_id = int(parts[-2])
+            group_id = int(parts[-1])
+        except (ValueError, IndexError):
+            await callback_query.answer("Invalid callback data", show_alert=True)
+            return
         
         # Check if user is admin
         member = await bot.get_chat_member(group_id, callback_query.from_user.id)
@@ -4831,8 +6184,13 @@ async def handle_advanced_refresh(callback_query: CallbackQuery):
             await callback_query.answer("Invalid callback data", show_alert=True)
             return
         
-        user_id = int(parts[2])
-        group_id = int(parts[3])
+        # Get last 2 parts as user_id and group_id (handles negative group IDs)
+        try:
+            user_id = int(parts[-2])
+            group_id = int(parts[-1])
+        except (ValueError, IndexError):
+            await callback_query.answer("Invalid callback data", show_alert=True)
+            return
         
         from bot.advanced_admin_panel import format_admin_panel_message, build_advanced_toggle_keyboard
         
@@ -4878,6 +6236,1788 @@ async def handle_advanced_close(callback_query: CallbackQuery):
         logger.error(f"Advanced close callback error: {e}")
         await callback_query.answer("Error closing panel", show_alert=True)
 
+
+async def refresh_free_menu(callback_query: CallbackQuery, user_id: int, group_id: int):
+    """Refresh the /free menu with updated permission states"""
+    try:
+        # Fetch current permission states from API
+        text_allowed = True
+        stickers_allowed = True
+        gifs_allowed = True
+        media_allowed = True
+        voice_allowed = True
+        links_allowed = True
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    perms = resp.json().get("data", {})
+                    text_allowed = bool(perms.get("can_send_messages", True))
+                    stickers_allowed = bool(perms.get("can_send_other_messages", True))
+                    gifs_allowed = bool(perms.get("can_send_other_messages", True))
+                    media_allowed = bool(perms.get("can_send_documents", True))
+                    voice_allowed = bool(perms.get("can_send_audios", True))
+                    links_allowed = bool(perms.get("can_add_web_page_previews", True))
+        except Exception as e:
+            logger.warning(f"Could not fetch permissions for refresh: {e}")
+        
+        # Fetch group policy settings (floods, spam, checks, silence)
+        group_policies = {}
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{group_id}/policies",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    group_policies = resp.json().get("data", {})
+        except Exception as e:
+            logger.debug(f"Could not fetch group policies for refresh: {e}")
+        
+        # Check night mode exemption and status
+        is_exempt = False
+        is_exempt_role = False
+        night_mode_active = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Check exemption
+                resp1 = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/check/{user_id}/text",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp1.status_code == 200:
+                    nm_data = resp1.json()
+                    is_exempt = bool(nm_data.get("is_exempt", False))
+                    is_exempt_role = nm_data.get("exempt_type") == "role" if "exempt_type" in nm_data else False
+                
+                # Check night mode status
+                resp2 = await client.get(
+                    f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/status",
+                    headers={"Authorization": f"Bearer {api_client.api_key}"},
+                    timeout=5
+                )
+                if resp2.status_code == 200:
+                    nm_status = resp2.json()
+                    night_mode_active = bool(nm_status.get("is_active", False))
+        except Exception as e:
+            logger.debug(f"Could not check night mode for refresh: {e}")
+        
+        # Extract policy settings with defaults
+        floods_enabled = group_policies.get("floods_enabled", False)
+        spam_enabled = group_policies.get("spam_enabled", False)
+        checks_enabled = group_policies.get("checks_enabled", False)
+        silence_mode = group_policies.get("silence_mode", False)
+        
+        # Build refreshed keyboard with UPDATED STATES
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            # ===== CONTENT PERMISSIONS SECTION =====
+            [InlineKeyboardButton(text="╔ 📋 CONTENT PERMISSIONS", callback_data="noop")],
+            
+            # Row 1: Text & Stickers
+            [
+                InlineKeyboardButton(
+                    text=f"📝 Text {'✅' if text_allowed else '❌'}",
+                    callback_data=f"free_toggle_text_{user_id}_{group_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎨 Stickers {'✅' if stickers_allowed else '❌'}",
+                    callback_data=f"free_toggle_stickers_{user_id}_{group_id}"
+                ),
+            ],
+            
+            # Row 2: GIFs & Media
+            [
+                InlineKeyboardButton(
+                    text=f"🎬 GIFs {'✅' if gifs_allowed else '❌'}",
+                    callback_data=f"free_toggle_gifs_{user_id}_{group_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"📸 Media {'✅' if media_allowed else '❌'}",
+                    callback_data=f"free_toggle_media_{user_id}_{group_id}"
+                ),
+            ],
+            
+            # Row 3: Voice & Links
+            [
+                InlineKeyboardButton(
+                    text=f"🎤 Voice {'✅' if voice_allowed else '❌'}",
+                    callback_data=f"free_toggle_voice_{user_id}_{group_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🔗 Links {'✅' if links_allowed else '❌'}",
+                    callback_data=f"free_toggle_links_{user_id}_{group_id}"
+                ),
+            ],
+            
+            # ===== BEHAVIOR FILTERS SECTION =====
+            [InlineKeyboardButton(text="╠ 🚨 BEHAVIOR FILTERS", callback_data="noop")],
+            
+            # Row 4: Floods & Spam
+            [
+                InlineKeyboardButton(
+                    text=f"🌊 Floods {'✅' if floods_enabled else '❌'}",
+                    callback_data=f"free_toggle_floods_{group_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"📨 Spam {'✅' if spam_enabled else '❌'}",
+                    callback_data=f"free_toggle_spam_{group_id}"
+                ),
+            ],
+            
+            # Row 5: Checks & Silence
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Checks {'✅' if checks_enabled else '❌'}",
+                    callback_data=f"free_toggle_checks_{group_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🌙 Silence {'✅' if silence_mode else '❌'}",
+                    callback_data=f"free_toggle_silence_{group_id}"
+                ),
+            ],
+            
+            # ===== NIGHT MODE SECTION =====
+            [InlineKeyboardButton(text="╠ 🌙 NIGHT MODE", callback_data="noop")],
+            
+            # Row 6: Night Mode Exemption
+            [
+                InlineKeyboardButton(
+                    text=f"🌙 Exempt {'✅' if is_exempt else '❌'}",
+                    callback_data=f"free_toggle_nightmode_{user_id}_{group_id}"
+                ),
+            ],
+            
+            # ===== CLOSE BUTTON =====
+            [InlineKeyboardButton(text="🚪 Close", callback_data=f"free_close_{user_id}_{group_id}")],
+        ])
+        
+        # Get advanced user info for detailed display
+        user_info = await get_advanced_user_info(user_id, group_id)
+        premium_badge = " 💎" if user_info['is_premium'] else ""
+        bot_badge = " 🤖" if user_info['is_bot'] else ""
+        
+        # Edit the message with updated keyboard and advanced user info
+        message_text = (
+            f"<b>⚙️ PERMISSION MANAGER</b>\n"
+            f"{'─' * 45}\n\n"
+            f"<b>👤 USER INFO:</b>\n"
+            f"  {user_info['mention_html']}{premium_badge}{bot_badge}\n"
+            f"  <b>Role:</b> {user_info['role_text']}\n"
+            f"  <b>ID:</b> <code>{user_id}</code>\n\n"
+            f"<b>⚙️ QUICK PERMISSIONS:</b>\n"
+            f"  {'✅' if is_exempt or True else '❌'} Management Active\n\n"
+            f"<i>💡 Click section headers to expand detailed settings</i>"
+        )
+        
+        await callback_query.message.edit_text(
+            message_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        
+        logger.info(f"✅ Refreshed /free menu for user={user_id} ({user_info['full_name']}), group={group_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error refreshing /free menu: {e}", exc_info=True)
+
+
+async def refresh_free_expanded_content(callback_query: CallbackQuery, user_id: int, group_id: int):
+    """Refresh the expanded content permissions menu with updated states and advanced user info"""
+    try:
+        # Get advanced user information
+        user_info = await get_advanced_user_info(user_id, group_id)
+        user_mention = user_info['mention_html']
+        
+        # Fetch current permissions
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                headers={"Authorization": f"Bearer {api_client.api_key}"},
+                timeout=5
+            )
+            if resp.status_code == 200:
+                perms = resp.json().get("data", {})
+            else:
+                perms = {}
+        
+        text_allowed = bool(perms.get("can_send_messages", True))
+        stickers_allowed = bool(perms.get("can_send_other_messages", True))
+        gifs_allowed = bool(perms.get("can_send_other_messages", True))
+        media_allowed = bool(perms.get("can_send_media_messages", True))
+        voice_allowed = bool(perms.get("can_send_audios", True))
+        links_allowed = bool(perms.get("can_add_web_page_previews", True))
+        
+        # Build expanded keyboard (same as expand handler)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_collapse_content_{user_id}_{group_id}")],
+            [
+                InlineKeyboardButton(text=f"📝 Text {'✅' if text_allowed else '❌'}", callback_data=f"free_toggle_text_{user_id}_{group_id}"),
+                InlineKeyboardButton(text=f"🎨 Stickers {'✅' if stickers_allowed else '❌'}", callback_data=f"free_toggle_stickers_{user_id}_{group_id}"),
+            ],
+            [
+                InlineKeyboardButton(text=f"🎬 GIFs {'✅' if gifs_allowed else '❌'}", callback_data=f"free_toggle_gifs_{user_id}_{group_id}"),
+                InlineKeyboardButton(text=f"📸 Media {'✅' if media_allowed else '❌'}", callback_data=f"free_toggle_media_{user_id}_{group_id}"),
+            ],
+            [
+                InlineKeyboardButton(text=f"🎤 Voice {'✅' if voice_allowed else '❌'}", callback_data=f"free_toggle_voice_{user_id}_{group_id}"),
+                InlineKeyboardButton(text=f"🔗 Links {'✅' if links_allowed else '❌'}", callback_data=f"free_toggle_links_{user_id}_{group_id}"),
+            ],
+            [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+            [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+            [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+            [
+                InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+            ],
+        ])
+        
+        # Build advanced menu text with premium badge and detailed user info
+        premium_badge = " 💎 <b>PREMIUM</b>" if user_info['is_premium'] else ""
+        bot_badge = " 🤖 <b>BOT</b>" if user_info['is_bot'] else ""
+        
+        menu_text = (
+            f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n"
+            f"{'─' * 50}\n\n"
+            f"<b>👤 MEMBER PROFILE:</b>\n"
+            f"  {user_mention}\n"
+            f"  <b>Role:</b> {user_info['role_text']}{premium_badge}{bot_badge}\n"
+            f"  <b>ID:</b> <code>{user_id}</code>\n"
+            f"  <b>Name:</b> {user_info['full_name']}\n"
+        )
+        
+        if user_info['username']:
+            menu_text += f"  <b>Username:</b> @{user_info['username']}\n"
+        
+        if user_info['custom_title']:
+            menu_text += f"  <b>Title:</b> <i>{user_info['custom_title']}</i>\n"
+        
+        menu_text += f"\n<b>📋 CONTENT PERMISSIONS:</b>\n"
+        menu_text += f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+        menu_text += f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+        menu_text += f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+        menu_text += f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+        menu_text += f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+        menu_text += f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}\n"
+        
+        menu_text += f"\n<i>💡 Click buttons to toggle individual permissions</i>"
+        
+        await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        logger.info(f"✅ Refreshed expanded content menu for user={user_id} ({user_info['full_name']}), group={group_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error refreshing expanded content menu: {e}", exc_info=True)
+
+
+async def get_user_mention(user_id: int, group_id: int) -> str:
+    """Get enhanced user mention link with name, emoji indicators, and role for HTML display
+    Returns format: <a href='tg://user?id={user_id}'>🎯 @username</a> with role badges
+    
+    Features:
+    - Smart emoji indicators (👑 for owner, ⭐ for admin, 👤 for member)
+    - Username with @ or full name fallback
+    - Role badge with permissions indicator
+    - Graceful fallback to user ID
+    """
+    try:
+        member = await bot.get_chat_member(group_id, user_id)
+        user = member.user
+        
+        # Determine role emoji
+        role_emoji = "👤"  # Default member
+        role_text = "Member"
+        
+        if member.status == "creator":
+            role_emoji = "👑"
+            role_text = "Owner"
+        elif member.status == "administrator":
+            role_emoji = "⭐"
+            role_text = "Admin"
+        elif member.status == "restricted":
+            role_emoji = "🔒"
+            role_text = "Restricted"
+        
+        # Get user display name
+        display_name = None
+        if user.username:
+            display_name = f"@{user.username}"
+        elif user.first_name:
+            display_name = user.first_name
+            if user.last_name:
+                display_name += f" {user.last_name}"
+        else:
+            display_name = f"User {user_id}"
+        
+        # Build advanced mention with role indicator
+        return f"<a href='tg://user?id={user_id}'>{role_emoji} {display_name}</a>"
+    except Exception as e:
+        logger.warning(f"Could not fetch user info for {user_id}: {e}")
+        return f"<a href='tg://user?id={user_id}'>👤 User {user_id}</a>"
+
+
+async def get_advanced_user_info(user_id: int, group_id: int) -> dict:
+    """Fetch comprehensive advanced user information including profile, permissions, and stats
+    
+    Returns dictionary with:
+    {
+        'user_id': int,
+        'first_name': str,
+        'last_name': str or None,
+        'username': str or None,
+        'is_bot': bool,
+        'role': str,  # 'creator', 'administrator', 'member', 'restricted'
+        'role_emoji': str,
+        'custom_title': str or None,
+        'has_profile_photo': bool,
+        'profile_photo_id': str or None,
+        'is_premium': bool,
+        'permissions': dict,
+        'mention_html': str,
+        'full_name': str,
+        'bio_info': str or None,
+    }
+    """
+    try:
+        member = await bot.get_chat_member(group_id, user_id)
+        user = member.user
+        
+        # Determine role and emoji
+        role_map = {
+            "creator": ("👑 Owner", "👑"),
+            "administrator": ("⭐ Administrator", "⭐"),
+            "member": ("👤 Member", "👤"),
+            "restricted": ("🔒 Restricted", "🔒"),
+            "left": ("↪️ Left", "↪️"),
+            "kicked": ("❌ Kicked", "❌"),
+        }
+        
+        role_text, role_emoji = role_map.get(member.status, ("👤 Unknown", "👤"))
+        
+        # Get display name
+        full_name = user.first_name or "Unknown"
+        if user.last_name:
+            full_name += f" {user.last_name}"
+        
+        # Try to get profile photos
+        profile_photo_id = None
+        has_profile_photo = False
+        try:
+            photos = await bot.get_user_profile_photos(user_id, limit=1)
+            if photos.photos and len(photos.photos) > 0:
+                has_profile_photo = True
+                # Get the largest photo (usually the last one in the list)
+                profile_photo_id = photos.photos[0][-1].file_id
+        except Exception as photo_error:
+            logger.debug(f"Could not fetch profile photo for {user_id}: {photo_error}")
+        
+        # Build permissions info
+        permissions = {
+            "can_send_messages": not member.is_member_restricted() if hasattr(member, 'is_member_restricted') else True,
+            "can_post_messages": member.can_post_messages if member.status == "administrator" else False,
+            "can_delete_messages": member.can_delete_messages if member.status == "administrator" else False,
+            "can_restrict_members": member.can_restrict_members if member.status == "administrator" else False,
+            "can_promote_members": member.can_promote_members if member.status == "administrator" else False,
+            "can_edit_messages": member.can_edit_messages if member.status == "administrator" else False,
+        }
+        
+        # Build HTML mention
+        display_name = f"@{user.username}" if user.username else full_name
+        mention_html = f"<a href='tg://user?id={user_id}'>{role_emoji} {display_name}</a>"
+        
+        return {
+            'user_id': user_id,
+            'first_name': user.first_name or "N/A",
+            'last_name': user.last_name,
+            'username': user.username,
+            'is_bot': user.is_bot,
+            'role': member.status,
+            'role_text': role_text,
+            'role_emoji': role_emoji,
+            'custom_title': member.custom_title,
+            'has_profile_photo': has_profile_photo,
+            'profile_photo_id': profile_photo_id,
+            'is_premium': user.is_premium if hasattr(user, 'is_premium') else False,
+            'permissions': permissions,
+            'mention_html': mention_html,
+            'full_name': full_name,
+            'display_name': display_name,
+        }
+    except Exception as e:
+        logger.warning(f"Could not fetch advanced user info for {user_id}: {e}")
+        return {
+            'user_id': user_id,
+            'first_name': "Unknown",
+            'last_name': None,
+            'username': None,
+            'is_bot': False,
+            'role': "unknown",
+            'role_text': "👤 Unknown",
+            'role_emoji': "👤",
+            'custom_title': None,
+            'has_profile_photo': False,
+            'profile_photo_id': None,
+            'is_premium': False,
+            'permissions': {},
+            'mention_html': f"<a href='tg://user?id={user_id}'>👤 User {user_id}</a>",
+            'full_name': f"User {user_id}",
+            'display_name': f"User {user_id}",
+        }
+
+
+async def handle_free_callback(callback_query: CallbackQuery):
+    """Handle /free command callbacks for advanced content & behavior management
+    
+    Supports callbacks like:
+    - free_toggle_text_<user_id>_<group_id> - Toggle text messages
+    - free_toggle_stickers_<user_id>_<group_id> - Toggle stickers
+    - free_toggle_gifs_<user_id>_<group_id> - Toggle GIFs
+    - free_toggle_media_<user_id>_<group_id> - Toggle media
+    - free_toggle_voice_<user_id>_<group_id> - Toggle voice
+    - free_toggle_links_<user_id>_<group_id> - Toggle links
+    - free_toggle_floods_<group_id> - Toggle floods detection
+    - free_toggle_spam_<group_id> - Toggle spam detection
+    - free_toggle_checks_<group_id> - Toggle verification
+    - free_toggle_silence_<group_id> - Toggle silence/night mode
+    - free_toggle_nightmode_<user_id>_<group_id> - Toggle night mode exemption
+    - free_reset_all_<user_id>_<group_id> - Reset all permissions
+    - free_close_<user_id>_<group_id> - Close menu
+    """
+    try:
+        data = callback_query.data
+        logger.info(f"📋 /free callback: {data}")
+        
+        # Check admin permission
+        if not await check_is_admin(callback_query.from_user.id, callback_query.message.chat.id):
+            await callback_query.answer("❌ Admin only", show_alert=True)
+            return
+        
+        # ===== EXPAND/COLLAPSE HANDLERS =====
+        if data.startswith("free_expand_content_"):
+            try:
+                remainder = data.replace("free_expand_content_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                # Get user mention
+                user_mention = await get_user_mention(user_id, group_id)
+                
+                # Fetch current permissions
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                    else:
+                        perms = {}
+                
+                text_allowed = bool(perms.get("can_send_messages", True))
+                stickers_allowed = bool(perms.get("can_send_other_messages", True))
+                gifs_allowed = bool(perms.get("can_send_other_messages", True))
+                media_allowed = bool(perms.get("can_send_media_messages", True))
+                voice_allowed = bool(perms.get("can_send_audios", True))
+                links_allowed = bool(perms.get("can_add_web_page_previews", True))
+                
+                # Build expanded keyboard
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_collapse_content_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text=f"📝 Text {'✅' if text_allowed else '❌'}", callback_data=f"free_toggle_text_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text=f"🎨 Stickers {'✅' if stickers_allowed else '❌'}", callback_data=f"free_toggle_stickers_{user_id}_{group_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text=f"🎬 GIFs {'✅' if gifs_allowed else '❌'}", callback_data=f"free_toggle_gifs_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text=f"📸 Media {'✅' if media_allowed else '❌'}", callback_data=f"free_toggle_media_{user_id}_{group_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text=f"🎤 Voice {'✅' if voice_allowed else '❌'}", callback_data=f"free_toggle_voice_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text=f"🔗 Links {'✅' if links_allowed else '❌'}", callback_data=f"free_toggle_links_{user_id}_{group_id}"),
+                    ],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>📋 CONTENT PERMISSIONS:</b>\n"
+                    f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+                    f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+                    f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+                    f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+                    f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+                    f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Content expand error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        elif data.startswith("free_collapse_content_"):
+            try:
+                remainder = data.replace("free_collapse_content_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                    else:
+                        perms = {}
+                
+                text_allowed = bool(perms.get("can_send_messages", True))
+                stickers_allowed = bool(perms.get("can_send_other_messages", True))
+                gifs_allowed = bool(perms.get("can_send_other_messages", True))
+                media_allowed = bool(perms.get("can_send_media_messages", True))
+                voice_allowed = bool(perms.get("can_send_audios", True))
+                links_allowed = bool(perms.get("can_add_web_page_previews", True))
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>📋 CONTENT PERMISSIONS:</b>\n"
+                    f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+                    f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+                    f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+                    f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+                    f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+                    f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}\n\n"
+                    f"<i>Click sections to expand</i>"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Content collapse error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== EXPAND BEHAVIOR FILTERS =====
+        elif data.startswith("free_expand_behavior_"):
+            try:
+                remainder = data.replace("free_expand_behavior_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                # Get user mention
+                user_mention = await get_user_mention(user_id, group_id)
+                
+                # Fetch behavior filter policies from the correct endpoint
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/policies",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        policies = resp.json().get("data", {})
+                    else:
+                        policies = {}
+                
+                floods_enabled = bool(policies.get("floods_enabled", False))
+                spam_enabled = bool(policies.get("spam_enabled", False))
+                checks_enabled = bool(policies.get("checks_enabled", False))
+                silence_enabled = bool(policies.get("silence_mode", False))
+                
+                # Build expanded keyboard
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▼ 🚨 BEHAVIOR FILTERS", callback_data=f"free_collapse_behavior_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text=f"🌊 Floods {'✅' if floods_enabled else '❌'}", callback_data=f"free_toggle_floods_{group_id}"),
+                        InlineKeyboardButton(text=f"📨 Spam {'✅' if spam_enabled else '❌'}", callback_data=f"free_toggle_spam_{group_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text=f"✅ Checks {'✅' if checks_enabled else '❌'}", callback_data=f"free_toggle_checks_{group_id}"),
+                        InlineKeyboardButton(text=f"🌙 Silence {'✅' if silence_enabled else '❌'}", callback_data=f"free_toggle_silence_{group_id}"),
+                    ],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>🚨 BEHAVIOR FILTERS:</b>\n"
+                    f"  🌊 Floods: {'✅ Enabled' if floods_enabled else '❌ Disabled'}\n"
+                    f"  📨 Spam: {'✅ Enabled' if spam_enabled else '❌ Disabled'}\n"
+                    f"  ✅ Checks: {'✅ Enabled' if checks_enabled else '❌ Disabled'}\n"
+                    f"  🌙 Silence: {'✅ Enabled' if silence_enabled else '❌ Disabled'}"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Behavior expand error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== COLLAPSE BEHAVIOR FILTERS =====
+        elif data.startswith("free_collapse_behavior_"):
+            try:
+                remainder = data.replace("free_collapse_behavior_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/settings",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        settings = resp.json().get("data", {})
+                    else:
+                        settings = {}
+                
+                text_allowed = True
+                stickers_allowed = True
+                gifs_allowed = True
+                media_allowed = True
+                voice_allowed = True
+                links_allowed = True
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>📋 CONTENT PERMISSIONS:</b>\n"
+                    f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+                    f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+                    f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+                    f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+                    f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+                    f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}\n\n"
+                    f"<i>Click sections to expand</i>"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Behavior collapse error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== EXPAND NIGHT MODE =====
+        elif data.startswith("free_expand_night_"):
+            try:
+                remainder = data.replace("free_expand_night_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                # Get user mention
+                user_mention = await get_user_mention(user_id, group_id)
+                
+                # Fetch night mode settings to get actual data
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Get night mode settings and exemptions
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/settings",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        settings = resp.json()
+                        night_mode_active = bool(settings.get("enabled", False))
+                        exempt_users = settings.get("exempt_user_ids", [])
+                        user_exempted = user_id in exempt_users
+                    else:
+                        night_mode_active = False
+                        user_exempted = False
+                
+                # Build expanded keyboard
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▼ 🌙 NIGHT MODE", callback_data=f"free_collapse_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text=f"🌃 Night Mode {'⭕ ACTIVE' if night_mode_active else '⭕ Inactive'}", callback_data=f"free_toggle_nightmode_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>🌙 NIGHT MODE:</b>\n"
+                    f"  User Exempted: {'✅ Yes' if user_exempted else '❌ No'}\n"
+                    f"  Tap button below to toggle exemption"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Night mode expand error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== COLLAPSE NIGHT MODE =====
+        elif data.startswith("free_collapse_night_"):
+            try:
+                remainder = data.replace("free_collapse_night_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                text_allowed = True
+                stickers_allowed = True
+                gifs_allowed = True
+                media_allowed = True
+                voice_allowed = True
+                links_allowed = True
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>📋 CONTENT PERMISSIONS:</b>\n"
+                    f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+                    f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+                    f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+                    f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+                    f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+                    f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}\n\n"
+                    f"<i>Click sections to expand</i>"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Night mode collapse error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== EXPAND PROFILE ANALYSIS =====
+        elif data.startswith("free_expand_profile_"):
+            try:
+                remainder = data.replace("free_expand_profile_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                # Get user mention
+                user_mention = await get_user_mention(user_id, group_id)
+                
+                # Build expanded keyboard
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▼ 🔍 PROFILE ANALYSIS", callback_data=f"free_collapse_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="🔗 Bio Scan", callback_data=f"free_bioscan_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="⚠️ Risk Check", callback_data=f"free_riskcheck_{user_id}_{group_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>🔍 PROFILE ANALYSIS:</b>\n"
+                    f"  🔗 Bio Scan: Analyze user biography\n"
+                    f"  ⚠️ Risk Check: Evaluate user risk level"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Profile analysis expand error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== COLLAPSE PROFILE ANALYSIS =====
+        elif data.startswith("free_collapse_profile_"):
+            try:
+                remainder = data.replace("free_collapse_profile_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                text_allowed = True
+                stickers_allowed = True
+                gifs_allowed = True
+                media_allowed = True
+                voice_allowed = True
+                links_allowed = True
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{user_id}_{group_id}")],
+                    [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                    [
+                        InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                        InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                    ],
+                ])
+                
+                menu_text = (
+                    f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                    f"<b>👤 Member:</b> {user_mention}\n"
+                    f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                    f"<b>📋 CONTENT PERMISSIONS:</b>\n"
+                    f"  📝 Text: {'✅ Allowed' if text_allowed else '❌ Blocked'}\n"
+                    f"  🎨 Stickers: {'✅ Allowed' if stickers_allowed else '❌ Blocked'}\n"
+                    f"  🎬 GIFs: {'✅ Allowed' if gifs_allowed else '❌ Blocked'}\n"
+                    f"  📸 Media: {'✅ Allowed' if media_allowed else '❌ Blocked'}\n"
+                    f"  🎤 Voice: {'✅ Allowed' if voice_allowed else '❌ Blocked'}\n"
+                    f"  🔗 Links: {'✅ Allowed' if links_allowed else '❌ Blocked'}\n\n"
+                    f"<i>Click sections to expand</i>"
+                )
+                
+                await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await callback_query.answer()
+            except Exception as e:
+                logger.error(f"Profile analysis collapse error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== CONTENT PERMISSION TOGGLES =====
+        elif data.startswith("free_toggle_text_"):
+            try:
+                # Parse: free_toggle_text_<user_id>_<group_id>
+                # Remove prefix and split carefully (group_id can be negative)
+                remainder = data.replace("free_toggle_text_", "")
+                # Find last underscore to separate user_id and group_id
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                # Toggle text messages permission
+                request_payload = {"user_id": user_id, "metadata": {"permission_type": "send_messages"}}
+                logger.info(f"📤 Sending toggle-text request: {request_payload}")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/toggle-permission",
+                        json=request_payload,
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    logger.info(f"📥 Response: {result.status_code} - {result.text[:200]}")
+                    
+                    if result.status_code == 200:
+                        try:
+                            response_data = result.json()
+                            toggled_state = response_data.get("data", {}).get("toggled_state")
+                            state_emoji = "✅ ON" if toggled_state else "🔴 OFF"
+                            await callback_query.answer(f"📝 Text {state_emoji}", show_alert=False)
+                            # ✅ REFRESH THE EXPANDED CONTENT MENU with updated states
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                        except:
+                            await callback_query.answer("📝 Text toggled ✅", show_alert=False)
+                            # Still try to refresh even if state extraction failed
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                    else:
+                        logger.error(f"Toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Toggle failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Text toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== STICKERS TOGGLE =====
+        elif data.startswith("free_toggle_stickers_"):
+            try:
+                # Parse: free_toggle_stickers_<user_id>_<group_id>
+                remainder = data.replace("free_toggle_stickers_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                request_payload = {"user_id": user_id, "metadata": {"permission_type": "send_other_messages"}}
+                logger.info(f"📤 Sending toggle-stickers request: {request_payload}")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/toggle-permission",
+                        content=json.dumps(request_payload),
+                        headers={
+                            "Authorization": f"Bearer {api_client.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        try:
+                            response_data = result.json()
+                            toggled_state = response_data.get("data", {}).get("toggled_state")
+                            state_emoji = "✅ ON" if toggled_state else "🔴 OFF"
+                            await callback_query.answer(f"🎨 Stickers {state_emoji}", show_alert=False)
+                            # ✅ REFRESH THE EXPANDED CONTENT MENU
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                        except:
+                            await callback_query.answer("🎨 Stickers toggled ✅", show_alert=False)
+                            # Still try to refresh
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                    else:
+                        logger.error(f"Toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Toggle failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Stickers toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== GIFs TOGGLE =====
+        elif data.startswith("free_toggle_gifs_"):
+            try:
+                # Parse: free_toggle_gifs_<user_id>_<group_id>
+                remainder = data.replace("free_toggle_gifs_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                request_payload = {"user_id": user_id, "metadata": {"permission_type": "send_other_messages"}}
+                logger.info(f"📤 Sending toggle-gifs request: {request_payload}")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/toggle-permission",
+                        content=json.dumps(request_payload),
+                        headers={
+                            "Authorization": f"Bearer {api_client.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        try:
+                            response_data = result.json()
+                            toggled_state = response_data.get("data", {}).get("toggled_state")
+                            state_emoji = "✅ ON" if toggled_state else "🔴 OFF"
+                            await callback_query.answer(f"🎬 GIFs {state_emoji}", show_alert=False)
+                            # ✅ REFRESH THE EXPANDED CONTENT MENU
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                        except:
+                            await callback_query.answer("🎬 GIFs toggled ✅", show_alert=False)
+                            # Still try to refresh
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                    else:
+                        logger.error(f"Toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Toggle failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"GIFs toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== MEDIA TOGGLE =====
+        elif data.startswith("free_toggle_media_"):
+            try:
+                # Parse: free_toggle_media_<user_id>_<group_id>
+                remainder = data.replace("free_toggle_media_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                request_payload = {"user_id": user_id, "metadata": {"permission_type": "send_documents"}}
+                logger.info(f"📤 Sending toggle-media request: {request_payload}")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/toggle-permission",
+                        content=json.dumps(request_payload),
+                        headers={
+                            "Authorization": f"Bearer {api_client.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        try:
+                            response_data = result.json()
+                            toggled_state = response_data.get("data", {}).get("toggled_state")
+                            state_emoji = "✅ ON" if toggled_state else "🔴 OFF"
+                            await callback_query.answer(f"📸 Media {state_emoji}", show_alert=False)
+                            # ✅ REFRESH THE EXPANDED CONTENT MENU
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                        except:
+                            await callback_query.answer("📸 Media toggled ✅", show_alert=False)
+                            # Still try to refresh
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                    else:
+                        logger.error(f"Toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Toggle failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Media toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== VOICE TOGGLE =====
+        elif data.startswith("free_toggle_voice_"):
+            try:
+                # Parse: free_toggle_voice_<user_id>_<group_id>
+                remainder = data.replace("free_toggle_voice_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                request_payload = {"user_id": user_id, "metadata": {"permission_type": "send_audios"}}
+                logger.info(f"📤 Sending toggle-voice request: {request_payload}")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/toggle-permission",
+                        content=json.dumps(request_payload),
+                        headers={
+                            "Authorization": f"Bearer {api_client.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        try:
+                            response_data = result.json()
+                            toggled_state = response_data.get("data", {}).get("toggled_state")
+                            state_emoji = "✅ ON" if toggled_state else "🔴 OFF"
+                            await callback_query.answer(f"🎤 Voice {state_emoji}", show_alert=False)
+                            # ✅ REFRESH THE EXPANDED CONTENT MENU
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                        except:
+                            await callback_query.answer("🎤 Voice toggled ✅", show_alert=False)
+                            # Still try to refresh
+                            await refresh_free_expanded_content(callback_query, user_id, group_id)
+                    else:
+                        logger.error(f"Toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Toggle failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Voice toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== LINKS TOGGLE =====
+        elif data.startswith("free_toggle_links_"):
+            try:
+                # Parse: free_toggle_links_<user_id>_<group_id>
+                remainder = data.replace("free_toggle_links_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/toggle-permission",
+                        json={"user_id": user_id, "permission_type": "can_add_web_page_previews"},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        await callback_query.answer("🔗 Links toggled ✅", show_alert=False)
+                        # ✅ REFRESH THE EXPANDED CONTENT MENU
+                        await refresh_free_expanded_content(callback_query, user_id, group_id)
+                    else:
+                        logger.error(f"Toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Toggle failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Links toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== FLOODS TOGGLE =====
+        elif data.startswith("free_toggle_floods_"):
+            try:
+                # Parse: free_toggle_floods_<group_id>
+                group_id = int(data.replace("free_toggle_floods_", ""))
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Toggle the policy
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/policies/floods",
+                        json={"enabled": True},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        # Get updated state
+                        policies_resp = await client.get(
+                            f"{api_client.base_url}/api/v2/groups/{group_id}/policies",
+                            headers={"Authorization": f"Bearer {api_client.api_key}"},
+                            timeout=5
+                        )
+                        
+                        if policies_resp.status_code == 200:
+                            policies = policies_resp.json().get("data", {})
+                            floods_enabled = bool(policies.get("floods_enabled", False))
+                            
+                            # Get user mention
+                            user_mention = await get_user_mention(callback_query.from_user.id, group_id)
+                            
+                            # Update message with new state
+                            menu_text = (
+                                f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                                f"<b>👤 Member:</b> {user_mention}\n"
+                                f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                                f"<b>🚨 BEHAVIOR FILTERS:</b>\n"
+                                f"  🌊 Floods: {'✅ Enabled' if floods_enabled else '❌ Disabled'}\n"
+                                f"  📨 Spam: {'✅ Enabled' if policies.get('spam_enabled', False) else '❌ Disabled'}\n"
+                                f"  ✅ Checks: {'✅ Enabled' if policies.get('checks_enabled', False) else '❌ Disabled'}\n"
+                                f"  🌙 Silence: {'✅ Enabled' if policies.get('silence_mode', False) else '❌ Disabled'}"
+                            )
+                            
+                            # Rebuild keyboard with updated states
+                            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▼ 🚨 BEHAVIOR FILTERS", callback_data=f"free_collapse_behavior_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text=f"🌊 Floods {'✅' if floods_enabled else '❌'}", callback_data=f"free_toggle_floods_{group_id}"),
+                                    InlineKeyboardButton(text=f"📨 Spam {'✅' if policies.get('spam_enabled', False) else '❌'}", callback_data=f"free_toggle_spam_{group_id}"),
+                                ],
+                                [
+                                    InlineKeyboardButton(text=f"✅ Checks {'✅' if policies.get('checks_enabled', False) else '❌'}", callback_data=f"free_toggle_checks_{group_id}"),
+                                    InlineKeyboardButton(text=f"🌙 Silence {'✅' if policies.get('silence_mode', False) else '❌'}", callback_data=f"free_toggle_silence_{group_id}"),
+                                ],
+                                [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{callback_query.from_user.id}_{group_id}"),
+                                    InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{callback_query.from_user.id}_{group_id}"),
+                                ],
+                            ])
+                            
+                            await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                        
+                        await callback_query.answer("🌊 Floods toggled! ✅", show_alert=False)
+                    else:
+                        logger.error(f"Policy toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Failed to toggle ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Floods toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== SPAM TOGGLE =====
+        elif data.startswith("free_toggle_spam_"):
+            try:
+                # Parse: free_toggle_spam_<group_id>
+                group_id = int(data.replace("free_toggle_spam_", ""))
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Toggle the policy
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/policies/spam",
+                        json={"enabled": True},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        # Get updated state
+                        policies_resp = await client.get(
+                            f"{api_client.base_url}/api/v2/groups/{group_id}/policies",
+                            headers={"Authorization": f"Bearer {api_client.api_key}"},
+                            timeout=5
+                        )
+                        
+                        if policies_resp.status_code == 200:
+                            policies = policies_resp.json().get("data", {})
+                            spam_enabled = bool(policies.get("spam_enabled", False))
+                            
+                            # Get user mention
+                            user_mention = await get_user_mention(callback_query.from_user.id, group_id)
+                            
+                            # Update message with new state
+                            menu_text = (
+                                f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                                f"<b>👤 Member:</b> {user_mention}\n"
+                                f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                                f"<b>🚨 BEHAVIOR FILTERS:</b>\n"
+                                f"  🌊 Floods: {'✅ Enabled' if policies.get('floods_enabled', False) else '❌ Disabled'}\n"
+                                f"  📨 Spam: {'✅ Enabled' if spam_enabled else '❌ Disabled'}\n"
+                                f"  ✅ Checks: {'✅ Enabled' if policies.get('checks_enabled', False) else '❌ Disabled'}\n"
+                                f"  🌙 Silence: {'✅ Enabled' if policies.get('silence_mode', False) else '❌ Disabled'}"
+                            )
+                            
+                            # Rebuild keyboard with updated states
+                            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="▼ � CONTENT PERMISSIONS", callback_data=f"free_expand_content_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▼ 🚨 BEHAVIOR FILTERS", callback_data=f"free_collapse_behavior_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text=f"🌊 Floods {'✅' if policies.get('floods_enabled', False) else '❌'}", callback_data=f"free_toggle_floods_{group_id}"),
+                                    InlineKeyboardButton(text=f"�📨 Spam {'✅' if spam_enabled else '❌'}", callback_data=f"free_toggle_spam_{group_id}"),
+                                ],
+                                [
+                                    InlineKeyboardButton(text=f"✅ Checks {'✅' if policies.get('checks_enabled', False) else '❌'}", callback_data=f"free_toggle_checks_{group_id}"),
+                                    InlineKeyboardButton(text=f"🌙 Silence {'✅' if policies.get('silence_mode', False) else '❌'}", callback_data=f"free_toggle_silence_{group_id}"),
+                                ],
+                                [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{callback_query.from_user.id}_{group_id}"),
+                                    InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{callback_query.from_user.id}_{group_id}"),
+                                ],
+                            ])
+                            
+                            await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                        
+                        await callback_query.answer("📨 Spam toggled! ✅", show_alert=False)
+                    else:
+                        logger.error(f"Policy toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Failed to toggle ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Spam toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== CHECKS TOGGLE =====
+        elif data.startswith("free_toggle_checks_"):
+            try:
+                # Parse: free_toggle_checks_<group_id>
+                group_id = int(data.replace("free_toggle_checks_", ""))
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Toggle the policy
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/policies/checks",
+                        json={"enabled": True},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        # Get updated state
+                        policies_resp = await client.get(
+                            f"{api_client.base_url}/api/v2/groups/{group_id}/policies",
+                            headers={"Authorization": f"Bearer {api_client.api_key}"},
+                            timeout=5
+                        )
+                        
+                        if policies_resp.status_code == 200:
+                            policies = policies_resp.json().get("data", {})
+                            checks_enabled = bool(policies.get("checks_enabled", False))
+                            
+                            # Get user mention
+                            user_mention = await get_user_mention(callback_query.from_user.id, group_id)
+                            
+                            # Update message with new state
+                            menu_text = (
+                                f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                                f"<b>👤 Member:</b> {user_mention}\n"
+                                f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                                f"<b>🚨 BEHAVIOR FILTERS:</b>\n"
+                                f"  🌊 Floods: {'✅ Enabled' if policies.get('floods_enabled', False) else '❌ Disabled'}\n"
+                                f"  📨 Spam: {'✅ Enabled' if policies.get('spam_enabled', False) else '❌ Disabled'}\n"
+                                f"  ✅ Checks: {'✅ Enabled' if checks_enabled else '❌ Disabled'}\n"
+                                f"  🌙 Silence: {'✅ Enabled' if policies.get('silence_mode', False) else '❌ Disabled'}"
+                            )
+                            
+                            # Rebuild keyboard with updated states
+                            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▼ 🚨 BEHAVIOR FILTERS", callback_data=f"free_collapse_behavior_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text=f"🌊 Floods {'✅' if policies.get('floods_enabled', False) else '❌'}", callback_data=f"free_toggle_floods_{group_id}"),
+                                    InlineKeyboardButton(text=f"📨 Spam {'✅' if policies.get('spam_enabled', False) else '❌'}", callback_data=f"free_toggle_spam_{group_id}"),
+                                ],
+                                [
+                                    InlineKeyboardButton(text=f"✅ Checks {'✅' if checks_enabled else '❌'}", callback_data=f"free_toggle_checks_{group_id}"),
+                                    InlineKeyboardButton(text=f"🌙 Silence {'✅' if policies.get('silence_mode', False) else '❌'}", callback_data=f"free_toggle_silence_{group_id}"),
+                                ],
+                                [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{callback_query.from_user.id}_{group_id}"),
+                                    InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{callback_query.from_user.id}_{group_id}"),
+                                ],
+                            ])
+                            
+                            await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                        
+                        await callback_query.answer("✅ Checks toggled! ✅", show_alert=False)
+                    else:
+                        logger.error(f"Policy toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Failed to toggle ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Checks toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== SILENCE MODE TOGGLE =====
+        elif data.startswith("free_toggle_silence_"):
+            try:
+                # Parse: free_toggle_silence_<group_id>
+                group_id = int(data.replace("free_toggle_silence_", ""))
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Toggle the policy
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/policies/silence",
+                        json={"enabled": True},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        # Get updated state
+                        policies_resp = await client.get(
+                            f"{api_client.base_url}/api/v2/groups/{group_id}/policies",
+                            headers={"Authorization": f"Bearer {api_client.api_key}"},
+                            timeout=5
+                        )
+                        
+                        if policies_resp.status_code == 200:
+                            policies = policies_resp.json().get("data", {})
+                            silence_enabled = bool(policies.get("silence_mode", False))
+                            
+                            # Get user mention
+                            user_mention = await get_user_mention(callback_query.from_user.id, group_id)
+                            
+                            # Update message with new state
+                            menu_text = (
+                                f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                                f"<b>👤 Member:</b> {user_mention}\n"
+                                f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                                f"<b>🚨 BEHAVIOR FILTERS:</b>\n"
+                                f"  🌊 Floods: {'✅ Enabled' if policies.get('floods_enabled', False) else '❌ Disabled'}\n"
+                                f"  📨 Spam: {'✅ Enabled' if policies.get('spam_enabled', False) else '❌ Disabled'}\n"
+                                f"  ✅ Checks: {'✅ Enabled' if policies.get('checks_enabled', False) else '❌ Disabled'}\n"
+                                f"  🌙 Silence: {'✅ Enabled' if silence_enabled else '❌ Disabled'}"
+                            )
+                            
+                            # Rebuild keyboard with updated states
+                            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▼ 🚨 BEHAVIOR FILTERS", callback_data=f"free_collapse_behavior_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text=f"🌊 Floods {'✅' if policies.get('floods_enabled', False) else '❌'}", callback_data=f"free_toggle_floods_{group_id}"),
+                                    InlineKeyboardButton(text=f"📨 Spam {'✅' if policies.get('spam_enabled', False) else '❌'}", callback_data=f"free_toggle_spam_{group_id}"),
+                                ],
+                                [
+                                    InlineKeyboardButton(text=f"✅ Checks {'✅' if policies.get('checks_enabled', False) else '❌'}", callback_data=f"free_toggle_checks_{group_id}"),
+                                    InlineKeyboardButton(text=f"🌙 Silence {'✅' if silence_enabled else '❌'}", callback_data=f"free_toggle_silence_{group_id}"),
+                                ],
+                                [InlineKeyboardButton(text="▶ 🌙 NIGHT MODE", callback_data=f"free_expand_night_{callback_query.from_user.id}_{group_id}")],
+                                [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{callback_query.from_user.id}_{group_id}")],
+                                [
+                                    InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{callback_query.from_user.id}_{group_id}"),
+                                    InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{callback_query.from_user.id}_{group_id}"),
+                                ],
+                            ])
+                            
+                            await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                        
+                        await callback_query.answer("🌙 Silence toggled! ✅", show_alert=False)
+                    else:
+                        logger.error(f"Policy toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Failed to toggle ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Silence toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== NIGHT MODE EXEMPTION TOGGLE =====
+        elif data.startswith("free_toggle_nightmode_"):
+            try:
+                # Parse: free_toggle_nightmode_<user_id>_<group_id>
+                remainder = data.replace("free_toggle_nightmode_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Toggle the exemption
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/night-mode/toggle-exempt/{user_id}",
+                        json={},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        response_data = result.json()
+                        user_exempted = response_data.get("is_exempt", False)
+                        
+                        # Get updated night mode settings
+                        settings_resp = await client.get(
+                            f"{api_client.base_url}/api/v2/groups/{group_id}/settings",
+                            headers={"Authorization": f"Bearer {api_client.api_key}"},
+                            timeout=5
+                        )
+                        
+                        if settings_resp.status_code == 200:
+                            settings = settings_resp.json().get("data", {})
+                            night_mode_active = bool(settings.get("night_mode", False))
+                        else:
+                            night_mode_active = False
+                        
+                        # Get user mention
+                        user_mention = await get_user_mention(user_id, group_id)
+                        
+                        # Update message with new state
+                        menu_text = (
+                            f"<b>⚙️ ADVANCED CONTENT & BEHAVIOR MANAGER</b>\n\n"
+                            f"<b>👤 Member:</b> {user_mention}\n"
+                            f"<b>👥 Group:</b> <code>{group_id}</code>\n\n"
+                            f"<b>🌙 NIGHT MODE:</b>\n"
+                            f"  Status: {'⭕ ACTIVE' if night_mode_active else '⭕ Inactive'}\n"
+                            f"  User Exempted: {'✅ Yes' if user_exempted else '❌ No'}"
+                        )
+                        
+                        # Rebuild keyboard with updated state
+                        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="▼ 📋 CONTENT PERMISSIONS", callback_data=f"free_expand_content_{user_id}_{group_id}")],
+                            [InlineKeyboardButton(text="▶ 🚨 BEHAVIOR FILTERS", callback_data=f"free_expand_behavior_{user_id}_{group_id}")],
+                            [InlineKeyboardButton(text="▼ 🌙 NIGHT MODE", callback_data=f"free_collapse_night_{user_id}_{group_id}")],
+                            [InlineKeyboardButton(text=f"🌃 Night Mode {'✅' if user_exempted else '❌'}", callback_data=f"free_toggle_nightmode_{user_id}_{group_id}")],
+                            [InlineKeyboardButton(text="▶ 🔍 PROFILE ANALYSIS", callback_data=f"free_expand_profile_{user_id}_{group_id}")],
+                            [
+                                InlineKeyboardButton(text="↻ Reset All", callback_data=f"free_reset_all_{user_id}_{group_id}"),
+                                InlineKeyboardButton(text="✖ Close", callback_data=f"free_close_{user_id}_{group_id}"),
+                            ],
+                        ])
+                        
+                        await callback_query.message.edit_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                        await callback_query.answer(f"🌃 Night mode exemption {'granted' if user_exempted else 'removed'}! ✅", show_alert=False)
+                    else:
+                        logger.error(f"Night mode toggle failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Failed to toggle ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Night mode toggle error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== RESET ALL PERMISSIONS =====
+        elif data.startswith("free_reset_all_"):
+            try:
+                # Parse: free_reset_all_<user_id>_<group_id>
+                remainder = data.replace("free_reset_all_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    result = await client.post(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/enforcement/reset-permissions",
+                        json={"user_id": user_id},
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    
+                    if result.status_code == 200:
+                        await callback_query.answer("↻ All permissions reset to default ✅", show_alert=False)
+                    else:
+                        logger.error(f"Reset failed: {result.status_code} - {result.text}")
+                        await callback_query.answer("Reset failed ❌", show_alert=True)
+            except Exception as e:
+                logger.error(f"Reset all error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== BIO SCAN (Profile Link Analysis) =====
+        elif data.startswith("free_bioscan_"):
+            try:
+                # Parse: free_bioscan_<user_id>_<group_id>
+                remainder = data.replace("free_bioscan_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                await callback_query.answer("🔗 Scanning user bio for suspicious links...", show_alert=False)
+                
+                try:
+                    # Get user info from Telegram
+                    user_info = await bot.get_chat_member(group_id, user_id)
+                    user_obj = user_info.user
+                    
+                    bio_text = ""
+                    links_found = []
+                    suspicious_patterns = []
+                    
+                    # Try to get bio from user
+                    try:
+                        user_full = await bot.get_chat(user_id)
+                        bio_text = user_full.bio or ""
+                    except:
+                        pass
+                    
+                    # Scan bio for links and suspicious patterns
+                    if bio_text:
+                        # Find URLs
+                        import re
+                        url_pattern = r'https?://[^\s]+'
+                        links_found = re.findall(url_pattern, bio_text)
+                        
+                        # Check for suspicious patterns
+                        suspicious_keywords = [
+                            'crypto', 'nft', 'ethereum', 'bitcoin', 'wallet',
+                            'money', 'investment', 'profit', 'earn', 'free', 
+                            'click', 'telegram', 'join', 'group', 'channel',
+                            'bot', 'token', 'mine', 'exchange', 'trade'
+                        ]
+                        
+                        bio_lower = bio_text.lower()
+                        for keyword in suspicious_keywords:
+                            if keyword in bio_lower:
+                                suspicious_patterns.append(keyword)
+                    
+                    # Build scan result
+                    scan_text = (
+                        f"<b>🔗 BIO SCAN RESULTS</b>\n"
+                        f"<code>User: {user_obj.first_name or 'Unknown'} ({user_id})</code>\n\n"
+                    )
+                    
+                    if not bio_text:
+                        scan_text += "⭐ No bio found\n\n"
+                    else:
+                        scan_text += f"<b>📝 Bio Text:</b>\n<code>{bio_text[:200]}</code>\n\n"
+                    
+                    if links_found:
+                        scan_text += f"<b>🔗 Links Found: {len(links_found)}</b>\n"
+                        for link in links_found[:3]:  # Show first 3 links
+                            scan_text += f"  • <code>{link[:50]}</code>\n"
+                        scan_text += "\n"
+                    else:
+                        scan_text += "✅ No links detected\n\n"
+                    
+                    if suspicious_patterns:
+                        scan_text += f"<b>⚠️ Suspicious Keywords: {len(set(suspicious_patterns))}</b>\n"
+                        for keyword in set(suspicious_patterns)[:5]:
+                            scan_text += f"  • <i>{keyword}</i>\n"
+                        scan_text += "\n"
+                        scan_text += f"<b>Risk Level:</b> <code>{'🔴 HIGH' if len(links_found) > 2 or len(set(suspicious_patterns)) > 3 else '🟡 MEDIUM' if links_found or suspicious_patterns else '🟢 LOW'}</code>\n"
+                    else:
+                        scan_text += "✅ No suspicious patterns detected\n\n"
+                        scan_text += f"<b>Risk Level:</b> <code>{'🟡 MEDIUM' if links_found else '🟢 LOW'}</code>\n"
+                    
+                    # Send scan result
+                    await callback_query.message.edit_text(
+                        scan_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Back", callback_data=f"free_back_{user_id}_{group_id}")],
+                        ])
+                    )
+                    
+                    logger.info(f"📊 Bio scan completed for user {user_id}: {len(links_found)} links, {len(set(suspicious_patterns))} suspicious keywords")
+                    
+                except Exception as scan_error:
+                    logger.error(f"Bio scan error: {scan_error}")
+                    await callback_query.message.edit_text(
+                        f"❌ <b>Bio Scan Failed</b>\n\n"
+                        f"<i>Could not scan user bio. They may have it hidden or bio is inaccessible.</i>\n\n"
+                        f"<code>Error: {str(scan_error)[:100]}</code>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Back", callback_data=f"free_back_{user_id}_{group_id}")],
+                        ])
+                    )
+            
+            except Exception as e:
+                logger.error(f"Bio scan callback error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== RISK CHECK (User Profile Risk Assessment) =====
+        elif data.startswith("free_riskcheck_"):
+            try:
+                # Parse: free_riskcheck_<user_id>_<group_id>
+                remainder = data.replace("free_riskcheck_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                await callback_query.answer("⚠️ Analyzing user profile for risk factors...", show_alert=False)
+                
+                try:
+                    user_info = await bot.get_chat_member(group_id, user_id)
+                    user_obj = user_info.user
+                    
+                    risk_factors = []
+                    risk_score = 0
+                    
+                    # Check: New account (joined recently)
+                    if user_obj.is_bot:
+                        risk_factors.append(("🤖 Bot Account", "May be automated spam/abuse"))
+                        risk_score += 15
+                    
+                    # Check: No profile photo
+                    try:
+                        photos = await bot.get_user_profile_photos(user_id, limit=1)
+                        if photos.total_count == 0:
+                            risk_factors.append(("📸 No Profile Photo", "Could indicate throwaway account"))
+                            risk_score += 10
+                    except:
+                        pass
+                    
+                    # Check: No first name or suspicious name
+                    if not user_obj.first_name or len(user_obj.first_name) < 2:
+                        risk_factors.append(("❓ Suspicious Name", "Very short or missing name"))
+                        risk_score += 5
+                    
+                    # Check: Username present
+                    if not user_obj.username:
+                        risk_factors.append(("🔐 No Username", "May hide identity"))
+                        risk_score += 5
+                    
+                    # Check: If restricted already
+                    if user_info.status == "restricted":
+                        risk_factors.append(("🚫 Restricted", "User is restricted in Telegram"))
+                        risk_score += 25
+                    
+                    # Check: If kicked/left recently
+                    if user_info.status == "left":
+                        risk_factors.append(("👻 Left Group", "Previously removed or left"))
+                        risk_score += 20
+                    
+                    # Build risk report
+                    risk_text = (
+                        f"<b>⚠️ RISK ASSESSMENT</b>\n"
+                        f"<code>User: {user_obj.first_name or 'Unknown'} ({user_id})</code>\n\n"
+                        f"<b>Risk Score: {risk_score}/100</b>\n"
+                    )
+                    
+                    # Risk level indicator
+                    if risk_score >= 70:
+                        risk_text += "<b>Level: 🔴 CRITICAL</b>\n"
+                    elif risk_score >= 50:
+                        risk_text += "<b>Level: 🟠 HIGH</b>\n"
+                    elif risk_score >= 25:
+                        risk_text += "<b>Level: 🟡 MEDIUM</b>\n"
+                    else:
+                        risk_text += "<b>Level: 🟢 LOW</b>\n"
+                    
+                    risk_text += "\n"
+                    
+                    if risk_factors:
+                        risk_text += "<b>Risk Factors Found:</b>\n"
+                        for factor, description in risk_factors:
+                            risk_text += f"  {factor}\n"
+                            risk_text += f"    <i>{description}</i>\n"
+                    else:
+                        risk_text += "✅ No risk factors detected\n"
+                    
+                    risk_text += (
+                        f"\n<b>Profile Status:</b> <code>{user_info.status}</code>\n"
+                        f"<b>Account Age:</b> <i>Unknown</i>\n"
+                    )
+                    
+                    await callback_query.message.edit_text(
+                        risk_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Back", callback_data=f"free_back_{user_id}_{group_id}")],
+                        ])
+                    )
+                    
+                    logger.info(f"⚠️ Risk check completed for user {user_id}: Score {risk_score}/100, {len(risk_factors)} factors")
+                    
+                except Exception as risk_error:
+                    logger.error(f"Risk check error: {risk_error}")
+                    await callback_query.message.edit_text(
+                        f"❌ <b>Risk Check Failed</b>\n\n"
+                        f"<i>Could not assess user profile.</i>\n\n"
+                        f"<code>Error: {str(risk_error)[:100]}</code>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Back", callback_data=f"free_back_{user_id}_{group_id}")],
+                        ])
+                    )
+            
+            except Exception as e:
+                logger.error(f"Risk check callback error: {e}")
+                await callback_query.answer(f"Error: {str(e)[:30]}", show_alert=True)
+        
+        # ===== BACK TO MENU =====
+        elif data.startswith("free_back_"):
+            try:
+                # Parse: free_back_<user_id>_<group_id>
+                remainder = data.replace("free_back_", "")
+                last_underscore = remainder.rfind("_")
+                user_id = int(remainder[:last_underscore])
+                group_id = int(remainder[last_underscore+1:])
+                
+                # Refresh menu and show it again
+                await refresh_free_menu(
+                    type('obj', (object,), {
+                        'message': callback_query.message,
+                        'answer': callback_query.answer,
+                        'from_user': type('obj', (object,), {'id': callback_query.from_user.id})()
+                    })(),
+                    user_id,
+                    group_id
+                )
+                await callback_query.answer("🔙 Returned to menu", show_alert=False)
+            except Exception as e:
+                logger.error(f"Back button error: {e}")
+                await callback_query.answer("Error returning to menu", show_alert=True)
+        
+        # ===== CLOSE MENU =====
+        elif data.startswith("free_close_"):
+            try:
+                await callback_query.message.delete()
+                await callback_query.answer("Menu closed ✅", show_alert=False)
+            except Exception as e:
+                logger.error(f"Close error: {e}")
+                await callback_query.answer("Closed", show_alert=False)
+        
+        # ===== NO-OP (Section headers) =====
+        elif data == "noop":
+            await callback_query.answer("ℹ️ This is a section header", show_alert=False)
+        
+        else:
+            logger.warning(f"Unknown /free callback: {data}")
+            await callback_query.answer("Unknown action", show_alert=True)
+    
+    except Exception as e:
+        logger.error(f"Free callback error: {e}")
+        await callback_query.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+# ============================================================================
+# CALLBACK HANDLERS
+# ============================================================================
 
 async def handle_callback(callback_query: CallbackQuery):
     """Handle inline button callbacks for quick actions and navigation - EDITS MESSAGE INSTEAD OF SENDING NEW"""
@@ -5188,6 +8328,10 @@ async def handle_callback(callback_query: CallbackQuery):
             await callback_query.answer("Settings closed")
             return
         
+        # Handle /free command callbacks (advanced content & behavior management)
+        if data.startswith("free_"):
+            return await handle_free_callback(callback_query)
+        
         # Handle permission toggle callbacks
         if data.startswith("toggle_perm_"):
             return await handle_permission_toggle_callback(callback_query, data)
@@ -5215,7 +8359,9 @@ async def handle_callback(callback_query: CallbackQuery):
             # Fallback to old format for backwards compatibility: action_user_id_group_id
             parts = data.split("_")
             if len(parts) < 3:
-                await callback_query.answer("Invalid callback data", show_alert=True)
+                # Better error message - could be a cached button that's expired
+                logger.warning(f"Invalid callback data format: {data} (cache may have expired, try sending command again)")
+                await callback_query.answer("⚠️ Button expired or cache cleared. Please use the command again.", show_alert=True)
                 return
             
             try:
@@ -5223,7 +8369,8 @@ async def handle_callback(callback_query: CallbackQuery):
                 target_user_id = int(parts[1])
                 group_id = int(parts[2])
             except (ValueError, IndexError):
-                await callback_query.answer("Invalid callback data format", show_alert=True)
+                logger.warning(f"Invalid callback parse: {data}")
+                await callback_query.answer("⚠️ Invalid button data. Please use the command again.", show_alert=True)
                 return
         
         # Handle info-only callbacks (no API call needed)
@@ -5642,9 +8789,24 @@ async def setup_bot():
         dispatcher.message.register(cmd_blacklist, Command("blacklist"))
         dispatcher.message.register(cmd_nightmode, Command("nightmode"))
         dispatcher.message.register(cmd_settings, Command("settings"))
+        
+        # Register new commands
+        dispatcher.message.register(cmd_captcha, Command("captcha"))
+        dispatcher.message.register(cmd_afk, Command("afk"))
+        dispatcher.message.register(cmd_stats, Command("stats"))
+        dispatcher.message.register(cmd_broadcast, Command("broadcast"))
+        dispatcher.message.register(cmd_slowmode, Command("slowmode"))
+        dispatcher.message.register(cmd_echo, Command("echo"))
+        dispatcher.message.register(cmd_notes, Command("notes"))
+        dispatcher.message.register(cmd_verify, Command("verify"))
+        dispatcher.message.register(cmd_id, Command("id"))
 
         # Register callback query handler for inline buttons
         dispatcher.callback_query.register(handle_callback)
+
+        # Register media filter handler (auto-delete restricted media)
+        # This runs on ALL messages to check permissions and auto-delete as needed
+        dispatcher.message.register(media_filter_handler)
 
         # Register chat member/update handlers for join/leave
         dispatcher.chat_member.register(chat_member_update_handler)
@@ -5700,6 +8862,16 @@ async def setup_bot():
                 BotCommand(command="whitelist", description="Manage whitelist (exemptions & moderators) (admin)"),
                 BotCommand(command="blacklist", description="Manage blacklist (stickers, GIFs, users, links) (admin)"),
                 BotCommand(command="nightmode", description="Configure night mode scheduling (admin)"),
+                # New commands
+                BotCommand(command="captcha", description="Enable/disable captcha verification (admin)"),
+                BotCommand(command="afk", description="Set/clear away from keyboard status"),
+                BotCommand(command="stats", description="Get group or user statistics"),
+                BotCommand(command="broadcast", description="Broadcast message to group (admin)"),
+                BotCommand(command="slowmode", description="Enable/disable slowmode (admin)"),
+                BotCommand(command="echo", description="Echo/repeat a message"),
+                BotCommand(command="notes", description="Manage group notes (admin)"),
+                BotCommand(command="verify", description="Verify users (admin)"),
+                BotCommand(command="id", description="Show user details with profile & role"),
             ])
             logger.info("✅ Bot commands registered")
         except Exception as e:
@@ -5720,6 +8892,146 @@ async def run_bot():
     except Exception as e:
         logger.error(f"❌ Bot polling failed: {e}")
         raise
+
+
+async def media_filter_handler(message: Message):
+    """Auto-delete restricted media messages based on /free command settings
+    
+    This handler runs on ALL messages and:
+    1. Checks if user has media restrictions enabled
+    2. Detects media type (sticker, GIF, voice, video note, photo, document, video, audio)
+    3. Auto-deletes if not allowed
+    4. Logs the action for audit trail
+    """
+    try:
+        # Only process in groups
+        if message.chat.type not in ["group", "supergroup"]:
+            return
+        
+        # Don't process bot's own messages
+        if message.from_user.is_bot:
+            return
+        
+        # Don't process command messages
+        if message.text and message.text.startswith("/"):
+            return
+        
+        user_id = message.from_user.id
+        group_id = message.chat.id
+        
+        # Fetch user's permission restrictions
+        should_delete = False
+        reason = ""
+        media_type = ""
+        
+        try:
+            # Determine what type of media the message contains
+            if message.sticker:
+                media_type = "sticker"
+                # Check if stickers are restricted
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                        # Stickers use can_send_other_messages
+                        if not perms.get("can_send_other_messages", True):
+                            should_delete = True
+                            reason = "Stickers restricted"
+            
+            elif message.animation:  # GIF
+                media_type = "GIF"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                        if not perms.get("can_send_other_messages", True):
+                            should_delete = True
+                            reason = "GIFs restricted"
+            
+            elif message.voice:
+                media_type = "voice_message"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                        if not perms.get("can_send_audios", True):
+                            should_delete = True
+                            reason = "Voice messages restricted"
+            
+            elif message.video_note:
+                media_type = "video_note"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                        if not perms.get("can_send_media_messages", True):
+                            should_delete = True
+                            reason = "Video notes restricted"
+            
+            elif message.photo or message.video or message.document or message.audio:
+                media_type = "media"
+                if message.photo:
+                    media_type = "photo"
+                elif message.video:
+                    media_type = "video"
+                elif message.document:
+                    media_type = "document"
+                elif message.audio:
+                    media_type = "audio"
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{api_client.base_url}/api/v2/groups/{group_id}/users/{user_id}/permissions",
+                        headers={"Authorization": f"Bearer {api_client.api_key}"},
+                        timeout=5
+                    )
+                    if resp.status_code == 200:
+                        perms = resp.json().get("data", {})
+                        if not perms.get("can_send_media_messages", True):
+                            should_delete = True
+                            reason = f"{media_type.capitalize()} restricted"
+            
+            # Delete the message if restricted
+            if should_delete:
+                try:
+                    await message.delete()
+                    logger.info(f"🗑️ Auto-deleted {media_type} from user {user_id} in group {group_id} ({reason})")
+                    
+                    # Log to API
+                    await api_client.post(
+                        f"/groups/{group_id}/logs/auto-delete",
+                        {
+                            "user_id": user_id,
+                            "media_type": media_type,
+                            "reason": reason,
+                            "message_id": message.message_id
+                        }
+                    )
+                except Exception as delete_error:
+                    logger.warning(f"Could not delete message: {delete_error}")
+        
+        except Exception as e:
+            logger.debug(f"Media filter check error: {e}")
+            # Don't fail the entire message processing, just skip this message
+    
+    except Exception as e:
+        logger.error(f"Media filter handler error: {e}")
 
 
 async def main():
